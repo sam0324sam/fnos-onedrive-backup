@@ -1,13 +1,13 @@
-# 🛡️ fnOS 雙集群 3-2-1 企業級異地加密備份系統規劃書
-> **Architecture & Operation Blueprint for Enterprise-Grade 3-2-1 Backup Solution**  
-> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Python SRE 守衛 ｜ 版本：v2.1 (GFS Edition)*
+# 🛡️ fnOS 4-3-2 企業級跨雲端異構加密備份系統規劃書
+> **Architecture & Operation Blueprint for Enterprise-Grade 4-3-2 Dual-Cloud Backup Solution**  
+> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Alist + Python SRE 守衛 ｜ 版本：v3.0 (4-3-2 Edition)*
 
 ---
 
 ## 📑 目錄
 1. [系統背景與設計原則](#一-系統背景與設計原則)
 2. [系統拓撲與架構設計](#二-系統拓撲與架構設計)
-3. [雙軌備份流程與資料流向](#三-雙軌備份流程與資料流向)
+3. [多階段備份流程與資料流向](#三-多階段備份流程與資料流向)
 4. [儲存擴充與負載策略 (方案 A 循序填滿)](#四-儲存擴充與負載策略-方案-a-循序填滿)
 5. [Docker 堆疊 GFS 階梯式生命週期規劃](#五-docker-堆疊-gfs-階梯式生命週期規劃)
 6. [零信任安全與資安防禦體系](#六-零信任安全與資安防禦體系)
@@ -19,20 +19,23 @@
 
 ## 一、 系統背景與設計原則
 
-本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、零運維**的 3-2-1 雲端自動化備份體系。
+本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、異構跨雲、零運維**的 4-3-2 雲端自動化備份體系。
 
-### 🌟 核心目標 (3-2-1 備份鐵律)
-* **3 份資料副本**：本地原始資料 + OD1 雲端主儲存 + OD2 雲端異地副本。
-* **2 種不同媒介**：本地實體 RAID 陣列 + 雲端物件式儲存。
-* **1 份異地鏡像**：**跨組織/跨租戶隔離 (Cross-Tenant Fault Isolation)**。OD1（`3lym23.onmicrosoft.com`）與 OD2（`auvooo.cn`）為兩個完全獨立的微軟租戶，即使單一微軟組織遭遇封號或風控，另一副本依然安全無虞。
+### 🌟 核心目標 (4-3-2 跨雲端異構備份鐵律)
+* **4 份資料副本**：本地原始資料 + OD1 雲端主儲存 + OD2 雲端異地鏡像 + 115 網盤 96TB 異構冷存檔。
+* **3 種不同介質**：本地實體 NVMe/HDD 陣列 + 微軟 M365 國際公有雲物件儲存 + 115 境內大容量冷儲存網盤。
+* **2 處實體異地**：**微軟跨租戶隔離 (Cross-Tenant)**（海外/香港節點） + **115 國內節點隔離**（境內超大容量冷儲存），徹底規避單一雲端供應商斷供、風控或國際海纜斷裂風險。
 
 ### 💎 設計原則
-1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，微軟亦無法解密分析。
+1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，微軟與 115 均無法分析檔案內容，100% 免疫國內網盤特徵審查與屏蔽。
 2. **只增不減 (Append-Only Copy)**：本地誤刪或遭受勒索病毒加密修改時，雲端歷史檔案**永不自動刪除**。
 3. **冷熱資料分離 (Storage Tiering)**：
    * 守衛程式與高頻日誌置於 **`/vol2` (NVMe 高速 SSD)**，避免日常巡檢喚醒硬碟。
    * 資料來源讀取 **`/vol1` (22TB RAID 10 大容量機械陣列)**，兼顧極速讀寫與延長硬碟壽命。
-4. **零寫死自適應 (Zero-Hardcoding)**：自動探索本地 UID 使用者目錄、自動掃描多雲合流池、動態生成行動端最適排版戰報。
+4. **解耦與 RPO 隔離 (Decoupled Cold Archival)**：
+   * 核心鏈路（OD1/OD2）高速並發傳輸，優先確保 RPO 目標達成。
+   * 異構冷鏈路（115 網盤）在核心鏡像完成後接續執行，採用低並發安全限流參數（`--transfers=1`），其限速或波動不阻塞主備份流程。
+5. **零寫死自適應 (Zero-Hardcoding)**：自動探索本地 UID 使用者目錄、自動掃描多雲合流池、動態生成行動端最適排版戰報。
 
 ---
 
@@ -44,6 +47,7 @@ graph TD
         SSD["/vol2 NVMe 應用池 (890GB)<br>• rclone-backup 容器<br>• 所有 Docker 設定檔 (1GB)"]
         HDD["/vol1 HDD 主資料池 (22TB RAID10)<br>• 1000 (sam), 1001 (hiyoko)<br>• 1002 (miya), @team"]
         Guard["rclone-backup-guard<br>(Python 3 智慧守衛進程)"]
+        Alist["Alist 容器 (:5244)<br>(115 WebDAV 橋接器)"]
         WebGUI["rclone-web-dashboard<br>(Port 5572 Web 儀表板)"]
     end
 
@@ -56,8 +60,12 @@ graph TD
     end
 
     subgraph Cloud_Cluster ["☁️ 雙集群異地容災 (OneDrive 5TB x 2)"]
-        OD1["☁️ OD1 主儲存池 (od1_union)<br>租戶: 3lym23.onmicrosoft.com<br>(5.0 TB 原生空間，可無限擴充)"]
+        OD1["☁️ OD1 主儲存池 (od1_union)<br>租戶: 3lym23.onmicrosoft.com<br>(5.0 TB 原生空間，可循序擴充)"]
         OD2["☁️ OD2 鏡像副本 (od2_union)<br>租戶: auvooo.cn<br>(5.0 TB 獨立租戶，跨域容災)"]
+    end
+
+    subgraph Cold_Archive ["❄️ 異構大容量冷存檔 (115 網盤 96TB)"]
+        C115["☁️ 115 網盤 (alist_115:fnOS_Backup/)<br>• 經由 Alist WebDAV 橋接<br>• 全程儲存 XSalsa20 .bin 密文<br>• 可由 115_crypt 隨時解密還原"]
     end
 
     SSD -.->|快照打包| Tar
@@ -65,13 +73,14 @@ graph TD
     HDD -->|唯讀增量掃描| Crypt
     Crypt -->|只增不減| OD1
     OD1 ==>|【階段 2】密文流式直傳<br>0 落盤 ｜ 0 CPU 運算| OD2
+    OD1 -.->|【階段 3】異構冷歸檔串流<br>低並發限流保護| Alist -.-> C115
 
     Guard -->|每日 02:00 / 巡檢告警| TG["📱 Telegram 機器人 (@msgMaster_bot)"]
 ```
 
 ---
 
-## 三、 雙軌備份流程與資料流向
+## 三、 多階段備份流程與資料流向
 
 系統於每日凌晨 **02:00** 自動啟動流水線（Pipeline）：
 
@@ -91,6 +100,13 @@ graph TD
 * **路徑**：`od1_union:` ➜ `od2_union:`。
 * **原理**：採用**純內存流式傳輸（In-Memory Stream-Through）**，資料以 64MB 區塊在 NAS 記憶體內轉發，**完全不落硬碟，零磁頭磨損**。
 * **免算力**：搬運已加密好的 `.bin` 密文，NAS 不進行二次加解密，CPU 使用率趨近於 0%。
+
+### 4. 階段 3：異構大容量冷歸檔 (115 Cloud Cold Archival)
+* **路徑**：`od1_union:` ➜ `alist_115:fnOS_Backup/`。
+* **橋接原理**：NAS 本機 Alist 容器提供 WebDAV (`:5244/dav/115`)，Rclone 直接向其串流寫入。
+* **限流安全策略**：115 網盤具有嚴格的防濫用與頻寬限制，階段 3 強制採用低並發保護（`--transfers=1`、`--checkers=2`、`--tpslimit=2`），確保穩定不斷流。
+* **容錯隔離**：階段 3 與核心鏈路解耦，115 若發生限速、排隊或網路波動，守衛日誌將記錄警示，絕不中斷主備份流程。
+* **端到端保密**：115 上的所有內容均為加密後的 `.bin` 密文，兼具 96TB 巨量歸檔與隱私合規，隨時可由 `115_crypt:` 解密還原。
 
 ---
 
@@ -169,7 +185,7 @@ graph TD
 Telegram 戰報採用手機最適化垂直結構，動態讀取 Linux 核心容量，排版範例：
 
 ```html
-📊 【fnOS 3-2-1 雙雲端每日維運日報】
+📊 【fnOS 4-3-2 跨雲端異構每日維運日報】
 📅 報告時間：2026-09-07 02:08:15
 
 🖥️ 本地資料池 (/vol1)
@@ -189,15 +205,20 @@ Telegram 戰報採用手機最適化垂直結構，動態讀取 Linux 核心容�
 • 節點清單：
   └ od2_1 🟢 剩餘 4.3 TB
 
+☁️ 115 異構冷歸檔池 (alist_115)
+• 網盤容量：96.0 TB ｜ 狀態：🟢 在線連通 (Alist WebDAV)
+• 密文路徑：alist_115:fnOS_Backup/ (XSalsa20 端到端保密)
+
 ⚡ 本次備份傳輸總結
 • 階段一 (NAS ➜ OD1 加密)：✅ 成功
 • 階段二 (OD1 ➜ OD2 鏡像)：✅ 成功
+• 階段三 (OD1 ➜ 115 冷歸檔)：✅ 成功 (已加密鏡像)
 • 容器快照 (Docker GFS)：✅ 已封存 (496 MB，GFS 階梯保留中)
 • 執行總耗時：2 分 15 秒
 
-🛡️ 3-2-1 容災鏈路狀態
-• 鏈路檢核：🛡️ 完全合規 (3-2-1 Verified)
-• 拓撲節點：[本地陣列] 🟢 ➜ [雲端主本] 🟢 ➜ [異地鏡像] 🟢
+🛡️ 4-3-2 容災鏈路狀態
+• 鏈路檢核：🛡️ 完全合規 (4-3-2 Dual-Cloud Verified)
+• 拓撲節點：[本地陣列] 🟢 ➜ [OD1 雲端主本] 🟢 ➜ [OD2 異地鏡像] 🟢 ➜ [115 異構冷備] 🟢
 
 ⏰ 下次例行備份：每日 02:00
 ```
@@ -226,7 +247,14 @@ docker exec -it rclone-backup-guard rclone copy "od1_crypt:docker_snapshots/dock
 tar -zxvf /tmp/docker_snapshot_20260906.tar.gz -C /vol2/1000/docker/
 ```
 
-### 情境 3：NAS 整機損毀或新機冷啟動復原 (Bare-metal Recovery)
+### 情境 3：微軟雙租戶遭遇不可抗力時，從 115 網盤解密還原
+若微軟海外服務中斷或租戶受限，可隨時透過本機 `115_crypt:` 自動解密還原：
+```bash
+# 從 115 網盤解密還原指定使用者資料夾
+docker exec -it rclone-backup-guard rclone copy "115_crypt:1000/MyDocuments" "/data/1000/MyDocuments_Restored" --config=/config/rclone/rclone.conf -P
+```
+
+### 情境 4：NAS 整機損毀或新機冷啟動復原 (Bare-metal Recovery)
 1. 在新機器安裝 Docker 與 Git。
 2. Clone 本倉庫：
    ```bash
@@ -252,9 +280,10 @@ cd /vol2/1000/docker/rclone-backup
 | **手動健康與容量檢查** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --check-only` |
 | **手動測試 Telegram 戰報** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --test-report` |
 | **手動立即執行 Docker GFS 備份**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
+| **手動立即執行 115 冷歸檔** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --cold-sync-now` |
 | **手動立即觸發全量雙集群備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
 | **即時查看守衛即時日誌** | `docker logs -f rclone-backup-guard` |
-| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase2_mirror.log` |
+| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase3_cold_115.log` |
 | **存取 Web GUI 儀表板** | 瀏覽器開啟 `http://<NAS_IP>:5572/` (內網免密碼直連) |
 
 ---

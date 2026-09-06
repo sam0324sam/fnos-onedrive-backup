@@ -62,3 +62,22 @@ remote = od2_union:
 filename_encryption = off
 directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
+
+# ---------- 集群 3 (115 網盤 96TB 異構冷備 - 經由 Alist WebDAV) ----------
+# 透過本機 Alist 容器 (http://<HOST_IP>:5244/dav/115) 作為 WebDAV 橋接
+[alist_115]
+type = webdav
+url = http://192.168.31.5:5244/dav/115
+vendor = other
+user = YOUR_ALIST_USERNAME
+pass = YOUR_OBSCURED_ALIST_PASSWORD
+
+# [115 客戶端強加密還原層 (XSalsa20)]
+# 與 OD1/OD2 使用完全相同的加密金鑰，在 115 上全程儲存為 .bin 密文
+[115_crypt]
+type = crypt
+remote = alist_115:fnOS_Backup
+filename_encryption = off
+directory_name_encryption = false
+password = YOUR_OBSCURED_PASSWORD
+
