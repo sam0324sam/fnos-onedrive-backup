@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fnOS 4-3-2 Heterogenous Dual-Cloud Enterprise Backup and Health Guard
+fnOS 5-4-3 Triple-Cloud Enterprise Backup and Health Guard
 - Phase 0: Docker GFS Snapshots -> od1_crypt (14 Daily, 8 Weekly, 12 Monthly)
 - Phase 1: Local NAS (/vol1) -> od1_crypt (Incremental, XSalsa20 Encrypted)
-- Phase 2: od1_union -> od2_union (Direct Ciphertext Mirror, Full Speed)
-- Phase 3: od1_union -> alist_115 (115 96TB Cold Archive, Low Concurrency)
+- Phase 2: od1_union -> od2_union (Microsoft Cross-Tenant Raw Mirror)
+- Phase 3: od1_union -> gd1_union (Google Drive 5TB Cross-Cloud Raw Mirror)
+- Phase 4: od1_union -> alist_115 (115 96TB Cold Archive, Low Concurrency)
 - Pre-flight Health and Capacity Guard with Telegram Executive Alerting
 """
 
@@ -287,12 +288,13 @@ def get_cluster_stats(cluster_name: str) -> dict:
         "all_ok": all_ok
     }
 
-def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list, docker_msg: str = "", phase3_msg: str = "") -> str:
-    """產出適合 Telegram 閱讀、高度自適應擴充的 4-3-2 / 3-2-1 全維度每日維運日報"""
+def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list, docker_msg: str = "", phase3_msg: str = "", phase4_msg: str = "") -> str:
+    """產出適合 Telegram 閱讀、高度自適應擴充的 5-4-3 / 4-3-2 / 3-2-1 全維度每日維運日報"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_stat = get_local_storage_stats("/data")
     clusters = get_all_union_clusters()
     cold_remote = get_cold_archive_remote()
+    has_gdrive = "gd1_union" in clusters
 
     # 1. 本地儲存池狀態 (完全動態讀取)
     targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
@@ -314,7 +316,15 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
         if not c_stat["all_ok"]:
             all_clusters_ok = False
 
-        alias_title = "OD1 主儲存池" if "od1" in c_name else ("OD2 鏡像副本" if "od2" in c_name else f"雲端池 ({c_name})")
+        if "od1" in c_name:
+            alias_title = "OD1 微軟主儲存池"
+        elif "od2" in c_name:
+            alias_title = "OD2 微軟鏡像副本"
+        elif "gd" in c_name:
+            alias_title = "GD1 谷歌鏡像副本"
+        else:
+            alias_title = f"雲端池 ({c_name})"
+
         lines = [f"☁️ <b>{alias_title} ({c_name})</b>"]
         lines.append(f"• 聚合總量：<b>{c_stat['total_tb']:.1f} TB</b> ｜ 剩餘可用：<b>{c_stat['free_tb']:.1f} TB</b>")
         lines.append(f"• 目前水位：<b>{c_stat['used_gb']:.1f} GB</b> ({c_stat['use_percent']:.1f}%)")
@@ -357,16 +367,24 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
         f"• 階段一 (NAS ➜ OD1 加密)：{phase1_status}",
         f"• 階段二 (OD1 ➜ OD2 鏡像)：{phase2_status}"
     ]
+    if has_gdrive:
+        phase3_display = phase3_msg if phase3_msg else "✅ 成功"
+        transfer_lines.append(f"• 階段三 (OD1 ➜ GD1 鏡像)：{phase3_display}")
     if cold_remote:
-        phase3_display = phase3_msg if phase3_msg else "✅ 成功 (已加密鏡像)"
-        transfer_lines.append(f"• 階段三 (OD1 ➜ 115 冷歸檔)：{phase3_display}")
+        phase4_display = phase4_msg if phase4_msg else "✅ 成功 (已加密鏡像)"
+        transfer_lines.append(f"• 階段四 (OD1 ➜ 115 冷歸檔)：{phase4_display}")
     if docker_msg:
         transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
     transfer_lines.append(f"• 執行總耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
-    # 4. 容災鏈路檢核 (4-3-2 或 3-2-1)
-    if cold_remote:
+    # 4. 容災鏈路檢核 (5-4-3 / 4-3-2 / 3-2-1)
+    if has_gdrive and cold_remote:
+        is_fully_compliant = phase1_success and phase2_success and all_clusters_ok and cold_ok
+        sla_badge = "🛡️ <b>完全合規 (5-4-3 Triple-Cloud Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
+        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ➜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'} ➜ [GD1 谷歌鏡像] {'🟢' if all_clusters_ok else '🔴'} ➜ [115 國內冷備] {'🟢' if cold_ok else '🔴'}"
+        title_prefix = "【fnOS 5-4-3 跨雲端三雲鼎立每日維運日報】"
+    elif cold_remote:
         is_fully_compliant = phase1_success and phase2_success and all_clusters_ok and cold_ok
         sla_badge = "🛡️ <b>完全合規 (4-3-2 Dual-Cloud Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
         topology = f"[本地陣列] 🟢 ➜ [OD1 雲端主本] {'🟢' if phase1_success else '🔴'} ➜ [OD2 異地鏡像] {'🟢' if phase2_success else '🔴'} ➜ [115 異構冷備] {'🟢' if cold_ok else '🔴'}"
@@ -396,9 +414,10 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     return full_report
 
 def run_health_guard() -> tuple[bool, str]:
-    """Check both OD1 and OD2 pool health and space"""
+    """Check OD1, OD2, and GD1 pool health and space"""
     od1_remotes = parse_union_upstreams("od1_union")
     od2_remotes = parse_union_upstreams("od2_union")
+    gd1_remotes = parse_union_upstreams("gd1_union")
 
     if not od1_remotes or not od2_remotes:
         msg = "⚠️ <b>【備份配置缺失】</b>\n未在 <code>rclone.conf</code> 中找到 <code>od1_union</code> 或 <code>od2_union</code> 的成員帳號，請先完成帳號授權配置！"
@@ -407,9 +426,12 @@ def run_health_guard() -> tuple[bool, str]:
 
     logging.info(f"Checking OD1 upstreams: {od1_remotes}")
     logging.info(f"Checking OD2 upstreams: {od2_remotes}")
+    if gd1_remotes:
+        logging.info(f"Checking GD1 upstreams: {gd1_remotes}")
 
     od1_status = [check_remote_quota(r) for r in od1_remotes]
     od2_status = [check_remote_quota(r) for r in od2_remotes]
+    gd1_status = [check_remote_quota(r) for r in gd1_remotes] if gd1_remotes else []
 
     critical_errors = []
     low_space_warnings = []
@@ -433,6 +455,13 @@ def run_health_guard() -> tuple[bool, str]:
             low_space_warnings.append(f"• <b>OD2 鏡像集群 [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
         else:
             od2_has_healthy_space = True
+
+    # Evaluate GD1
+    for s in gd1_status:
+        if s["status"] == "ERROR":
+            critical_errors.append(f"• <b>GD1 谷歌集群 [{s['remote']}]</b> 連線異常/失效：{s['error']}")
+        elif s["status"] == "LOW_SPACE":
+            low_space_warnings.append(f"• <b>GD1 谷歌集群 [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
 
     if critical_errors:
         alert_msg = (
@@ -574,27 +603,65 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
 
     logging.info(f"Docker snapshot {archive_name} uploaded successfully ({archive_size_mb:.1f} MB).")
 
-    # 執行雙集群 GFS 梯次清理
+    # 執行多集群 GFS 梯次清理
     prune_gfs_snapshots("od1_crypt:docker_snapshots")
     prune_gfs_snapshots("od2_crypt:docker_snapshots")
+    if "gd1_union" in get_all_union_clusters():
+        prune_gfs_snapshots("gd1_crypt:docker_snapshots")
 
     return True, f"✅ 已封存 ({archive_size_mb:.1f} MB, GFS 階梯保留中)"
 
-def execute_phase3_cold_archive() -> tuple[bool, str]:
+def execute_gdrive_mirror() -> tuple[bool, str]:
     """
-    階段三：異構冷歸檔 (OD1 ➜ 115 網盤)
+    階段三：Google Drive 5TB 高速異地鏡像 (OD1 ➜ GD1)
+    - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
+    - 目的：gd1_union:
+    - 傳輸參數：高速並發 (--transfers=4, --checkers=8, --tpslimit=10, --fast-list, --drive-chunk-size=64M)
+    """
+    clusters = get_all_union_clusters()
+    if "gd1_union" not in clusters:
+        return True, "未配置略過"
+
+    logging.info("=== Phase 3: Starting od1_union -> gd1_union (Google Drive Raw Mirror) ===")
+    gdrive_log = os.path.join(LOG_DIR, "phase3_gdrive_mirror.log")
+    cmd_gdrive = [
+        "rclone", "copy", "od1_union:", "gd1_union:",
+        f"--config={CONFIG_PATH}",
+        "--transfers=4",
+        "--checkers=8",
+        "--tpslimit=10",
+        "--fast-list",
+        "--drive-chunk-size=64M",
+        "-v",
+        f"--log-file={gdrive_log}"
+    ]
+    try:
+        res = subprocess.run(cmd_gdrive, timeout=7200)
+        if res.returncode == 0:
+            logging.info("Phase 3 (Google Drive Mirror) completed successfully.")
+            return True, "✅ 成功 (已加密鏡像)"
+        else:
+            logging.warning(f"Phase 3 (Google Drive Mirror) exited with code {res.returncode}")
+            return False, f"❌ 失敗 (Code {res.returncode})"
+    except Exception as e:
+        logging.error(f"Phase 3 (Google Drive Mirror) failed: {e}")
+        return False, f"❌ 異常 ({str(e)[:25]})"
+
+def execute_phase4_cold_archive() -> tuple[bool, str]:
+    """
+    階段四：異構冷歸檔 (OD1 ➜ 115 網盤)
     - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
     - 目的：alist_115:fnOS_Backup/
-    - 傳輸參數：低並發保護 (--transfers=1, --checkers=2, --tpslimit=2, --drive-chunk-size=64M)
+    - 傳輸參數：低並發保護 (--transfers=1, --checkers=2, --tpslimit=2, --timeout=2h)
     - 容錯隔離：115 限速或網路波動不阻斷主備份流程
     """
     cold_remote = get_cold_archive_remote()
     if not cold_remote:
         return True, "未配置略過"
 
-    logging.info("=== Phase 3: Starting OD1 -> 115 Cold Archive (Raw Ciphertext Mirror) ===")
-    phase3_log = os.path.join(LOG_DIR, "phase3_cold_115.log")
-    cmd_phase3 = [
+    logging.info("=== Phase 4: Starting OD1 -> 115 Cold Archive (Raw Ciphertext Mirror) ===")
+    phase4_log = os.path.join(LOG_DIR, "phase4_cold_115.log")
+    cmd_phase4 = [
         "rclone", "copy", "od1_union:", f"{cold_remote}:fnOS_Backup/",
         f"--config={CONFIG_PATH}",
         "--transfers=1",
@@ -606,26 +673,26 @@ def execute_phase3_cold_archive() -> tuple[bool, str]:
         "--retries-sleep=30s",
         "--fast-list",
         "-v",
-        f"--log-file={phase3_log}"
+        f"--log-file={phase4_log}"
     ]
     try:
-        res_phase3 = subprocess.run(cmd_phase3, timeout=14400)
-        if res_phase3.returncode == 0:
-            logging.info("Phase 3 (115 Cold Archive) completed successfully.")
+        res_phase4 = subprocess.run(cmd_phase4, timeout=14400)
+        if res_phase4.returncode == 0:
+            logging.info("Phase 4 (115 Cold Archive) completed successfully.")
             return True, "✅ 成功 (已加密鏡像)"
         else:
-            logging.warning(f"Phase 3 (115 Cold Archive) exited with returncode {res_phase3.returncode}")
-            return False, f"⚠️ 傳輸警示 (Code {res_phase3.returncode})"
+            logging.warning(f"Phase 4 (115 Cold Archive) exited with returncode {res_phase4.returncode}")
+            return False, f"⚠️ 傳輸警示 (Code {res_phase4.returncode})"
     except subprocess.TimeoutExpired:
-        logging.error("Phase 3 timed out.")
+        logging.error("Phase 4 timed out.")
         return False, "⚠️ 超時中斷 (下次自動續傳)"
     except Exception as e:
-        logging.error(f"Phase 3 failed with exception: {e}")
+        logging.error(f"Phase 4 failed with exception: {e}")
         return False, f"❌ 異常 ({str(e)[:25]})"
 
 # ================= Sync Logic =================
 def execute_backup():
-    """Perform Phase 0 (Docker GFS), Phase 1, Phase 2, and Phase 3 (Cold Archive)"""
+    """Perform Phase 0 (Docker GFS), Phase 1, Phase 2, Phase 3 (Google Drive), and Phase 4 (115 Cold Archive)"""
     logging.info("Starting Backup Workflow...")
     start_time = time.time()
 
@@ -702,19 +769,22 @@ def execute_backup():
     res_phase2 = subprocess.run(cmd_phase2)
     phase2_success = (res_phase2.returncode == 0)
 
-    # 5. Phase 3: od1_union -> 115 Cold Archive (Decoupled, Low Concurrency)
-    phase3_success, phase3_msg = execute_phase3_cold_archive()
+    # 5. Phase 3: od1_union -> gd1_union (Google Drive 5TB Raw Mirror)
+    phase3_success, phase3_msg = execute_gdrive_mirror()
+
+    # 6. Phase 4: od1_union -> 115 Cold Archive (Decoupled, Low Concurrency)
+    phase4_success, phase4_msg = execute_phase4_cold_archive()
     
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets, docker_msg, phase3_msg)
+    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets, docker_msg, phase3_msg, phase4_msg)
     send_telegram(report_msg)
 
 # ================= Daemon Loop =================
 def run_daemon():
     logging.info(f"fnOS Backup Daemon started. Daily scheduled sync time: {SYNC_SCHEDULE_TIME}")
-    send_telegram(f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行雙雲端同步。")
+    send_telegram(f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行三雲鼎立同步。")
 
     last_sync_date = ""
     last_health_check_hour = -1
@@ -738,10 +808,11 @@ def run_daemon():
         time.sleep(30)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="fnOS 4-3-2 Dual-Cloud Backup Manager")
+    parser = argparse.ArgumentParser(description="fnOS 5-4-3 Triple-Cloud Backup Manager")
     parser.add_argument("--check-only", action="store_true", help="Only run health & capacity check")
     parser.add_argument("--docker-backup-now", action="store_true", help="Run Docker GFS snapshot and upload now")
-    parser.add_argument("--cold-sync-now", action="store_true", help="Run Phase 3 (115 Cold Archive) mirror immediately")
+    parser.add_argument("--gdrive-sync-now", action="store_true", help="Run Phase 3 (Google Drive 5TB Mirror) immediately")
+    parser.add_argument("--cold-sync-now", action="store_true", help="Run Phase 4 (115 Cold Archive) mirror immediately")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup immediately")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
@@ -753,12 +824,15 @@ if __name__ == "__main__":
     elif args.docker_backup_now:
         success, msg = execute_docker_gfs_backup()
         print(f"Docker Backup Result: {success} -> {msg}")
+    elif args.gdrive_sync_now:
+        success, msg = execute_gdrive_mirror()
+        print(f"Google Drive Mirror Result: {success} -> {msg}")
     elif args.cold_sync_now:
-        success, msg = execute_phase3_cold_archive()
+        success, msg = execute_phase4_cold_archive()
         print(f"Cold Archive Result: {success} -> {msg}")
     elif args.test_report:
         targets = get_backup_targets()
-        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", "✅ 成功 (已加密鏡像)")
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", "✅ 成功 (已加密鏡像)", "✅ 成功 (已加密鏡像)")
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")

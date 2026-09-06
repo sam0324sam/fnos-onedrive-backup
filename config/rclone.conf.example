@@ -1,5 +1,5 @@
 # ================================================================
-# fnOS 雙集群 3-2-1 備份 Rclone 配置範本 (rclone.conf.example)
+# fnOS 5-4-3 跨雲端三雲鼎立備份 Rclone 配置範本 (rclone.conf.example)
 # 請複製此檔為 rclone.conf，並填入實際 Token 與加密密鑰
 # ================================================================
 
@@ -63,7 +63,35 @@ filename_encryption = off
 directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
 
-# ---------- 集群 3 (115 網盤 96TB 異構冷備 - 經由 Alist WebDAV) ----------
+# ---------- 集群 3 (Google Drive 5TB 國際公有雲鏡像 GD1 Pool) ----------
+[gd1_1]
+type = drive
+scope = drive
+token = {"access_token":"YOUR_ACCESS_TOKEN","token_type":"Bearer","refresh_token":"YOUR_REFRESH_TOKEN","expiry":"2026-09-06T18:00:00.0000000+08:00"}
+
+# [虛擬合流層 - 單帳號 alias 模式]
+[gd1_union]
+type = alias
+remote = gd1_1:fnOS_Backup
+
+# [多帳號擴充模式 - 方案 A 循序填滿 (Sequential Fill / 溢流模式)]
+# 當接入第 2 個帳號 (gd1_2) 時，註解上方 alias，改用下方 union 設定：
+# [gd1_union]
+# type = union
+# upstreams = gd1_1:fnOS_Backup gd1_2:fnOS_Backup
+# action_policy = epff
+# create_policy = ff
+# min_free_space = 50G
+
+# [GD1 客戶端強加密還原層 (XSalsa20)]
+[gd1_crypt]
+type = crypt
+remote = gd1_union:
+filename_encryption = off
+directory_name_encryption = false
+password = YOUR_OBSCURED_PASSWORD
+
+# ---------- 集群 4 (115 網盤 96TB 境內異構冷備 - 經由 Alist WebDAV) ----------
 # 透過本機 Alist 容器 (http://<HOST_IP>:5244/dav/115) 作為 WebDAV 橋接
 [alist_115]
 type = webdav
@@ -73,11 +101,12 @@ user = YOUR_ALIST_USERNAME
 pass = YOUR_OBSCURED_ALIST_PASSWORD
 
 # [115 客戶端強加密還原層 (XSalsa20)]
-# 與 OD1/OD2 使用完全相同的加密金鑰，在 115 上全程儲存為 .bin 密文
+# 與 OD1/OD2/GD1 使用完全相同的加密金鑰，在 115 上全程儲存為 .bin 密文
 [115_crypt]
 type = crypt
 remote = alist_115:fnOS_Backup
 filename_encryption = off
 directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
+
 
