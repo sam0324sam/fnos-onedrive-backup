@@ -16,6 +16,7 @@ import logging
 import argparse
 import subprocess
 import configparser
+import shutil
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -151,6 +152,172 @@ def check_remote_quota(remote: str) -> dict:
             "used_gb": 0,
             "free_gb": 0
         }
+
+def get_local_storage_stats(path="/data") -> dict:
+    """動態取得本地儲存池 (如 /vol1 掛載至 /data) 容量與使用量"""
+    if not os.path.exists(path):
+        return {}
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return {
+            "total_tb": total / (1024**4),
+            "used_gb": used / (1024**3),
+            "used_tb": used / (1024**4),
+            "free_tb": free / (1024**4),
+            "use_percent": (used / total) * 100 if total > 0 else 0
+        }
+    except Exception as e:
+        logging.error(f"Error reading disk usage for {path}: {e}")
+        return {}
+
+def get_all_union_clusters() -> list:
+    """自動從 rclone.conf 中搜尋所有合流池/集群 (如 od1_union, od2_union, 或未來新增的 gdrive_union 等)"""
+    if not os.path.exists(CONFIG_PATH):
+        return ["od1_union", "od2_union"]
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_PATH, encoding="utf-8")
+    clusters = []
+    for sec in cfg.sections():
+        if sec.endswith("_union"):
+            clusters.append(sec)
+    return clusters if clusters else ["od1_union", "od2_union"]
+
+def get_cluster_stats(cluster_name: str) -> dict:
+    """動態計算單一雲端合流池內所有帳號之總量、已用、剩餘與健康狀態"""
+    upstreams = parse_union_upstreams(cluster_name)
+    accounts = []
+    total_bytes = 0
+    used_bytes = 0
+    free_bytes = 0
+    all_ok = True
+
+    for r in upstreams:
+        q = check_remote_quota(r)
+        if q["status"] == "OK":
+            t = q.get("total_gb", 0) * (1024**3)
+            u = q.get("used_gb", 0) * (1024**3)
+            f = q.get("free_gb", 0) * (1024**3)
+            total_bytes += t
+            used_bytes += u
+            free_bytes += f
+            accounts.append({
+                "remote": r,
+                "status": "🟢",
+                "free_tb": q["free_gb"] / 1024.0,
+                "free_gb": q["free_gb"],
+                "total_tb": (t / (1024**4)) if t > 0 else 0
+            })
+        elif q["status"] == "LOW_SPACE":
+            t = q.get("total_gb", 0) * (1024**3)
+            u = q.get("used_gb", 0) * (1024**3)
+            f = q.get("free_gb", 0) * (1024**3)
+            total_bytes += t
+            used_bytes += u
+            free_bytes += f
+            accounts.append({
+                "remote": r,
+                "status": "🟡",
+                "free_tb": q["free_gb"] / 1024.0,
+                "free_gb": q["free_gb"],
+                "total_tb": (t / (1024**4)) if t > 0 else 0
+            })
+        else:
+            all_ok = False
+            accounts.append({
+                "remote": r,
+                "status": "🔴",
+                "error": q.get("error", "連線異常")
+            })
+
+    total_tb = total_bytes / (1024**4)
+    used_gb = used_bytes / (1024**3)
+    free_tb = free_bytes / (1024**4)
+    use_percent = (used_bytes / total_bytes * 100) if total_bytes > 0 else 0
+
+    return {
+        "name": cluster_name,
+        "upstreams": upstreams,
+        "accounts": accounts,
+        "total_tb": total_tb,
+        "used_gb": used_gb,
+        "free_tb": free_tb,
+        "use_percent": use_percent,
+        "all_ok": all_ok
+    }
+
+def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list) -> str:
+    """產出適合 Telegram 閱讀、高度自適應擴充的每日全維度日報"""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    local_stat = get_local_storage_stats("/data")
+    clusters = get_all_union_clusters()
+
+    # 1. 本地儲存池狀態 (完全動態讀取)
+    targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
+    if local_stat:
+        local_sec = (
+            f"🖥️ <b>本地資料池 (/vol1)</b>\n"
+            f"• 陣列容量：<b>{local_stat['total_tb']:.1f} TB</b> ｜ 剩餘可用：<b>{local_stat['free_tb']:.1f} TB</b>\n"
+            f"• 目前水位：<b>{local_stat['used_gb']:.1f} GB</b> ({local_stat['use_percent']:.1f}%)\n"
+            f"• 自動納管：{targets_str}"
+        )
+    else:
+        local_sec = f"🖥️ <b>本地資料池</b>\n• 自動納管：{targets_str}"
+
+    # 2. 雲端集群狀態 (動態迴圈支援未來任意多個 union 集群與帳號擴充)
+    cloud_sections = []
+    all_clusters_ok = True
+    for c_name in clusters:
+        c_stat = get_cluster_stats(c_name)
+        if not c_stat["all_ok"]:
+            all_clusters_ok = False
+
+        alias_title = "OD1 主儲存池" if "od1" in c_name else ("OD2 鏡像副本" if "od2" in c_name else f"雲端池 ({c_name})")
+        lines = [f"☁️ <b>{alias_title} ({c_name})</b>"]
+        lines.append(f"• 聚合總量：<b>{c_stat['total_tb']:.1f} TB</b> ｜ 剩餘可用：<b>{c_stat['free_tb']:.1f} TB</b>")
+        lines.append(f"• 目前水位：<b>{c_stat['used_gb']:.1f} GB</b> ({c_stat['use_percent']:.1f}%)")
+        lines.append("• 節點清單：")
+
+        accs = c_stat.get("accounts", [])
+        for idx, a in enumerate(accs):
+            branch = "└" if idx == len(accs) - 1 else "├"
+            if a["status"] in ["🟢", "🟡"]:
+                lines.append(f"  {branch} <code>{a['remote']}</code> {a['status']} 剩餘 {a['free_tb']:.1f} TB")
+            else:
+                lines.append(f"  {branch} <code>{a['remote']}</code> 🔴 連線異常")
+        cloud_sections.append("\n".join(lines))
+
+    cloud_sec = "\n\n".join(cloud_sections)
+
+    # 3. 本次備份傳輸指標
+    phase1_status = "✅ 成功" if phase1_success else "❌ 失敗"
+    phase2_status = "✅ 成功" if phase2_success else "❌ 失敗"
+    transfer_sec = (
+        f"⚡ <b>本次備份傳輸總結</b>\n"
+        f"• 階段一 (NAS ➜ OD1 加密)：{phase1_status}\n"
+        f"• 階段二 (OD1 ➜ OD2 鏡像)：{phase2_status}\n"
+        f"• 執行總耗時：{duration_str}"
+    )
+
+    # 4. 3-2-1 容災鏈路檢核
+    is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
+    sla_badge = "🛡️ <b>完全合規 (3-2-1 Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
+
+    sla_sec = (
+        f"🛡️ <b>3-2-1 容災鏈路狀態</b>\n"
+        f"• 鏈路檢核：{sla_badge}\n"
+        f"• 拓撲節點：[本地陣列] 🟢 ➜ [雲端主本] {'🟢' if phase1_success else '🔴'} ➜ [異地鏡像] {'🟢' if phase2_success else '🔴'}"
+    )
+
+    full_report = (
+        f"📊 <b>【fnOS 3-2-1 雙雲端每日維運日報】</b>\n"
+        f"📅 <b>報告時間：</b> {now_str}\n\n"
+        f"{local_sec}\n\n"
+        f"{cloud_sec}\n\n"
+        f"{transfer_sec}\n\n"
+        f"{sla_sec}\n\n"
+        f"⏰ <b>下次例行備份：</b> 每日 {SYNC_SCHEDULE_TIME}"
+    )
+    return full_report
 
 def run_health_guard() -> tuple[bool, str]:
     """Check both OD1 and OD2 pool health and space"""
@@ -297,30 +464,8 @@ def execute_backup():
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    od1_remotes = parse_union_upstreams("od1_union")
-    od2_remotes = parse_union_upstreams("od2_union")
-    od1_free_total = sum(check_remote_quota(r)["free_gb"] for r in od1_remotes)
-    od2_free_total = sum(check_remote_quota(r)["free_gb"] for r in od2_remotes)
-
-    if phase2_success:
-        summary_msg = (
-            "🎉 <b>【fnOS 備份系統 - 每日雙集群同步完成】</b>\n\n"
-            + "<b>階段一（NAS ➜ OD1 加密備份）：</b> 成功\n"
-            + "\n".join(phase1_details) + "\n\n"
-            + "<b>階段二（OD1 ➜ OD2 密文鏡像）：</b> 成功\n\n"
-            + f"⏱️ <b>總耗時：</b> {duration_str}\n"
-            + f"📊 <b>OD1 池剩餘：</b> {od1_free_total:.1f} GB\n"
-            + f"📊 <b>OD2 池剩餘：</b> {od2_free_total:.1f} GB\n"
-            + "🛡️ 3-2-1 雙雲端異地副本狀態完整！"
-        )
-    else:
-        summary_msg = (
-            "⚠️ <b>【fnOS 備份系統 - 部分完成提醒】</b>\n\n"
-            + "<b>階段一（NAS ➜ OD1）：</b> ✅ 成功\n"
-            + "<b>階段二（OD1 ➜ OD2 鏡像）：</b> ❌ 失敗 (請檢查 phase2 日誌)\n"
-            + f"⏱️ <b>總耗時：</b> {duration_str}\n"
-        )
-    send_telegram(summary_msg)
+    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets)
+    send_telegram(report_msg)
 
 # ================= Daemon Loop =================
 def run_daemon():
@@ -351,6 +496,7 @@ def run_daemon():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="fnOS OneDrive Dual-Cluster Backup Manager")
     parser.add_argument("--check-only", action="store_true", help="Only run health & capacity check")
+    parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--sync-now", action="store_true", help="Run backup immediately")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
     args = parser.parse_args()
@@ -358,6 +504,12 @@ if __name__ == "__main__":
     if args.check_only:
         can, stat = run_health_guard()
         print(f"Health Check Result: {stat} (Can Proceed: {can})")
+    elif args.test_report:
+        targets = get_backup_targets()
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets)
+        print(report)
+        success = send_telegram(report)
+        print(f"Telegram Send Result: {success}")
     elif args.sync_now:
         execute_backup()
     elif args.daemon:
