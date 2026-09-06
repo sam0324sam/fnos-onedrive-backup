@@ -16,10 +16,11 @@ import logging
 import argparse
 import subprocess
 import configparser
+import re
 import shutil
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, date
 
 # ================= Configuration =================
 CONFIG_PATH = os.environ.get("RCLONE_CONFIG", "/config/rclone/rclone.conf")
@@ -29,6 +30,8 @@ TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 FREE_THRESHOLD_GB = float(os.environ.get("FREE_THRESHOLD_GB", "100.0"))
 SYNC_SCHEDULE_TIME = os.environ.get("SYNC_SCHEDULE_TIME", "02:00")  # HH:MM format
 DEFAULT_DATA_FOLDERS = ["1000", "1001", "1002", "@team"]
+DOCKER_SRC = os.environ.get("DOCKER_SRC", "/docker_src")
+STAGING_DIR = os.path.join(LOG_DIR, "staging")
 
 def get_backup_targets() -> list:
     """自動探索 /data 下所有純數字使用者 UID (如 1000, 1001, 1002, 1003...) 與 @team 目錄"""
@@ -245,7 +248,7 @@ def get_cluster_stats(cluster_name: str) -> dict:
         "all_ok": all_ok
     }
 
-def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list) -> str:
+def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list, docker_msg: str = "") -> str:
     """產出適合 Telegram 閱讀、高度自適應擴充的每日全維度日報"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_stat = get_local_storage_stats("/data")
@@ -291,12 +294,15 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     # 3. 本次備份傳輸指標
     phase1_status = "✅ 成功" if phase1_success else "❌ 失敗"
     phase2_status = "✅ 成功" if phase2_success else "❌ 失敗"
-    transfer_sec = (
-        f"⚡ <b>本次備份傳輸總結</b>\n"
-        f"• 階段一 (NAS ➜ OD1 加密)：{phase1_status}\n"
-        f"• 階段二 (OD1 ➜ OD2 鏡像)：{phase2_status}\n"
-        f"• 執行總耗時：{duration_str}"
-    )
+    transfer_lines = [
+        "⚡ <b>本次備份傳輸總結</b>",
+        f"• 階段一 (NAS ➜ OD1 加密)：{phase1_status}",
+        f"• 階段二 (OD1 ➜ OD2 鏡像)：{phase2_status}"
+    ]
+    if docker_msg:
+        transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
+    transfer_lines.append(f"• 執行總耗時：{duration_str}")
+    transfer_sec = "\n".join(transfer_lines)
 
     # 4. 3-2-1 容災鏈路檢核
     is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
@@ -386,19 +392,141 @@ def run_health_guard() -> tuple[bool, str]:
 
     return True, "READY"
 
+# ================= Docker GFS Snapshot Engine =================
+def prune_gfs_snapshots(remote_dir: str):
+    """
+    實施 GFS (Grandfather-Father-Son) 階梯式生命週期淘汰：
+    - Tier 1 (日備份): 最近 14 天內每天保留 1 份
+    - Tier 2 (週備份): 最近 70 天 (約 10 週) 內，每週日保留 1 份 (weekday == 6)
+    - Tier 3 (月備份): 最近 365 天 (1 年) 內，每月 1 號保留 1 份 (day == 1)
+    其餘不符合上述梯度的過期快照自動刪除
+    """
+    logging.info(f"Running GFS retention pruning on {remote_dir}...")
+    ls_cmd = [
+        "rclone", "lsf", f"{remote_dir}/",
+        f"--config={CONFIG_PATH}"
+    ]
+    res_ls = subprocess.run(ls_cmd, capture_output=True, text=True)
+    if res_ls.returncode != 0:
+        logging.warning(f"Unable to list files in {remote_dir} for pruning: {res_ls.stderr.strip()}")
+        return
+
+    today = date.today()
+    files = [f.strip() for f in res_ls.stdout.splitlines() if f.strip()]
+    pattern = re.compile(r"^docker_snapshot_(\d{8})\.tar\.gz$")
+
+    for fname in files:
+        match = pattern.match(fname)
+        if not match:
+            continue
+        try:
+            f_date = datetime.strptime(match.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+
+        age_days = (today - f_date).days
+        keep = False
+
+        # Tier 1: 最近 14 天
+        if age_days <= 14:
+            keep = True
+        # Tier 2: 最近 70 天內的週日 (Sunday)
+        elif age_days <= 70 and f_date.weekday() == 6:
+            keep = True
+        # Tier 3: 最近 365 天內的每月 1 號
+        elif age_days <= 365 and f_date.day == 1:
+            keep = True
+
+        if not keep:
+            logging.info(f"GFS Pruning: Deleting expired snapshot {fname} from {remote_dir} (Age: {age_days} days)...")
+            del_cmd = [
+                "rclone", "deletefile", f"{remote_dir}/{fname}",
+                f"--config={CONFIG_PATH}"
+            ]
+            subprocess.run(del_cmd)
+
+def execute_docker_gfs_backup() -> tuple[bool, str]:
+    """
+    1. 打包 /docker_src 排除無效暫存與日誌
+    2. 上傳至 od1_crypt:docker_snapshots/
+    3. 執行 GFS (14天日備份 + 8週週備份 + 12個月月備份) 生命週期修剪
+    4. 同步修剪 od2_crypt:docker_snapshots/ 確保副本一致性
+    """
+    if not os.path.exists(DOCKER_SRC):
+        logging.info(f"Docker source path {DOCKER_SRC} not found, skipping docker backup.")
+        return True, "未掛載略過"
+
+    os.makedirs(STAGING_DIR, exist_ok=True)
+    today_str = datetime.now().strftime("%Y%m%d")
+    archive_name = f"docker_snapshot_{today_str}.tar.gz"
+    staging_archive = os.path.join(STAGING_DIR, archive_name)
+
+    logging.info(f"Creating Docker GFS archive: {archive_name}...")
+    tar_cmd = [
+        "tar", "-czf", staging_archive,
+        "-C", DOCKER_SRC,
+        "--exclude=rclone-backup/logs/*",
+        "--exclude=rclone-backup/.git/*",
+        "--exclude=rclone-backup/staging/*",
+        "--exclude=*/cache/*",
+        "--exclude=*/.cache/*",
+        "--exclude=*/Crashpad/*",
+        "."
+    ]
+    res_tar = subprocess.run(tar_cmd, capture_output=True, text=True)
+    if res_tar.returncode != 0:
+        err = res_tar.stderr.strip() or "Tar command failed"
+        logging.error(f"Failed to create docker archive: {err}")
+        return False, f"打包失敗: {err}"
+
+    archive_size_mb = os.path.getsize(staging_archive) / (1024 * 1024)
+    logging.info(f"Docker archive created successfully ({archive_size_mb:.1f} MB). Uploading to od1_crypt:docker_snapshots/...")
+
+    upload_cmd = [
+        "rclone", "copy", staging_archive, "od1_crypt:docker_snapshots/",
+        f"--config={CONFIG_PATH}",
+        "--drive-chunk-size=64M",
+        "--fast-list",
+        "-v"
+    ]
+    res_upload = subprocess.run(upload_cmd, capture_output=True, text=True)
+
+    if os.path.exists(staging_archive):
+        try:
+            os.remove(staging_archive)
+        except Exception:
+            pass
+
+    if res_upload.returncode != 0:
+        err = res_upload.stderr.strip() or "Rclone upload failed"
+        logging.error(f"Failed to upload docker snapshot: {err}")
+        return False, f"上傳失敗: {err}"
+
+    logging.info(f"Docker snapshot {archive_name} uploaded successfully ({archive_size_mb:.1f} MB).")
+
+    # 執行雙集群 GFS 梯次清理
+    prune_gfs_snapshots("od1_crypt:docker_snapshots")
+    prune_gfs_snapshots("od2_crypt:docker_snapshots")
+
+    return True, f"✅ 已封存 ({archive_size_mb:.1f} MB, GFS 階梯保留中)"
+
 # ================= Sync Logic =================
 def execute_backup():
-    """Perform Phase 1 and Phase 2 backup"""
+    """Perform Phase 0 (Docker GFS), Phase 1, and Phase 2 backup"""
     logging.info("Starting Backup Workflow...")
     start_time = time.time()
-    
+
     # 1. Health Guard Pre-check
     can_proceed, status = run_health_guard()
     if not can_proceed:
         logging.warning(f"Health guard blocked backup with status: {status}")
         return
 
-    # 2. Phase 1: NAS -> od1_crypt
+    # 2. Phase 0: Docker GFS Snapshot
+    logging.info("=== Phase 0: Starting Docker GFS Snapshot ===")
+    docker_success, docker_msg = execute_docker_gfs_backup()
+
+    # 3. Phase 1: NAS -> od1_crypt
     logging.info("=== Phase 1: Starting NAS -> od1_crypt ===")
     phase1_success = True
     phase1_details = []
@@ -464,7 +592,7 @@ def execute_backup():
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets)
+    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets, docker_msg)
     send_telegram(report_msg)
 
 # ================= Daemon Loop =================
@@ -496,6 +624,7 @@ def run_daemon():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="fnOS OneDrive Dual-Cluster Backup Manager")
     parser.add_argument("--check-only", action="store_true", help="Only run health & capacity check")
+    parser.add_argument("--docker-backup-now", action="store_true", help="Run Docker GFS snapshot and upload now")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--sync-now", action="store_true", help="Run backup immediately")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
@@ -504,9 +633,12 @@ if __name__ == "__main__":
     if args.check_only:
         can, stat = run_health_guard()
         print(f"Health Check Result: {stat} (Can Proceed: {can})")
+    elif args.docker_backup_now:
+        success, msg = execute_docker_gfs_backup()
+        print(f"Docker Backup Result: {success} -> {msg}")
     elif args.test_report:
         targets = get_backup_targets()
-        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets)
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496 MB，GFS 階梯保留中)")
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")

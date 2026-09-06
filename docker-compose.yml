@@ -28,6 +28,7 @@ services:
       - /vol2/1000/docker/rclone-backup/config:/config/rclone
       - /vol2/1000/docker/rclone-backup/scripts:/app/scripts
       - /vol1:/data:ro
+      - /vol2/1000/docker:/docker_src:ro
       - /vol2/1000/docker/rclone-backup/logs:/logs
     environment:
       - TZ=Asia/Taipei
