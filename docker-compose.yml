@@ -1,0 +1,37 @@
+services:
+  rclone-gui:
+    image: rclone/rclone:latest
+    container_name: rclone-web-dashboard
+    restart: unless-stopped
+    ports:
+      - "5572:5572"
+    volumes:
+      - /vol2/1000/docker/rclone-backup/config:/config/rclone
+      - /vol1:/data:ro
+      - /vol2/1000/docker/rclone-backup/logs:/logs
+    environment:
+      - TZ=Asia/Taipei
+    command:
+      - rcd
+      - --rc-web-gui
+      - --rc-web-gui-no-open-browser
+      - --rc-addr=0.0.0.0:5572
+      - --rc-no-auth
+      - --config=/config/rclone/rclone.conf
+
+  backup-guard:
+    image: rclone-backup-runner:latest
+    build: .
+    container_name: rclone-backup-guard
+    restart: unless-stopped
+    volumes:
+      - /vol2/1000/docker/rclone-backup/config:/config/rclone
+      - /vol2/1000/docker/rclone-backup/scripts:/app/scripts
+      - /vol1:/data:ro
+      - /vol2/1000/docker/rclone-backup/logs:/logs
+    environment:
+      - TZ=Asia/Taipei
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - FREE_THRESHOLD_GB=${FREE_THRESHOLD_GB:-100.0}
+      - SYNC_SCHEDULE_TIME=${SYNC_SCHEDULE_TIME:-02:00}
