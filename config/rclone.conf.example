@@ -92,10 +92,10 @@ directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
 
 # ---------- 集群 4 (115 網盤 96TB 境內異構冷備 - 經由 Alist WebDAV) ----------
-# 透過本機 Alist 容器 (http://<HOST_IP>:5244/dav/115) 作為 WebDAV 橋接
+# 透過本機 Alist 容器 (http://<HOST_IP>:5244/dav/backup/115) 作為 WebDAV 橋接
 [alist_115]
 type = webdav
-url = http://192.168.31.5:5244/dav/115
+url = http://192.168.31.5:5244/dav/backup/115
 vendor = other
 user = YOUR_ALIST_USERNAME
 pass = YOUR_OBSCURED_ALIST_PASSWORD
