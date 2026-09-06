@@ -600,8 +600,11 @@ def execute_phase3_cold_archive() -> tuple[bool, str]:
         "--transfers=1",
         "--checkers=2",
         "--tpslimit=2",
+        "--timeout=2h",
+        "--contimeout=5m",
+        "--retries=2",
+        "--retries-sleep=30s",
         "--fast-list",
-        "--drive-chunk-size=64M",
         "-v",
         f"--log-file={phase3_log}"
     ]
