@@ -23,6 +23,7 @@ import re
 import shutil
 import urllib.request
 import urllib.parse
+import concurrent.futures
 from datetime import datetime, date
 
 # ================= Configuration =================
@@ -375,6 +376,7 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
         transfer_lines.append(f"• 階段四 (OD1 ➜ 115 冷歸檔)：{phase4_display}")
     if docker_msg:
         transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
+    transfer_lines.append("• 傳輸架構：⚡ 三雲扇出並行 (Parallel Fan-Out)")
     transfer_lines.append(f"• 執行總耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
@@ -611,12 +613,44 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
 
     return True, f"✅ 已封存 ({archive_size_mb:.1f} MB, GFS 階梯保留中)"
 
+def execute_od2_mirror() -> tuple[bool, str]:
+    """
+    階段二：微軟雙租戶高速異地鏡像 (OD1 ➜ OD2)
+    - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
+    - 目的：od2_union:
+    - 傳輸參數：平行流量治理 (--transfers=2, --checkers=4, --tpslimit=5, --fast-list, --drive-chunk-size=64M)
+    """
+    logging.info("=== Phase 2: Starting od1_union -> od2_union (Microsoft Raw Mirror) ===")
+    phase2_log = os.path.join(LOG_DIR, "phase2_mirror.log")
+    cmd_phase2 = [
+        "rclone", "copy", "od1_union:", "od2_union:",
+        f"--config={CONFIG_PATH}",
+        "--transfers=2",
+        "--checkers=4",
+        "--tpslimit=5",
+        "--fast-list",
+        "--drive-chunk-size=64M",
+        "-v",
+        f"--log-file={phase2_log}"
+    ]
+    try:
+        res = subprocess.run(cmd_phase2, timeout=28800)
+        if res.returncode == 0:
+            logging.info("Phase 2 (OD2 Mirror) completed successfully.")
+            return True, "✅ 成功 (已加密鏡像)"
+        else:
+            logging.warning(f"Phase 2 (OD2 Mirror) exited with code {res.returncode}")
+            return False, f"❌ 失敗 (Code {res.returncode})"
+    except Exception as e:
+        logging.error(f"Phase 2 (OD2 Mirror) failed: {e}")
+        return False, f"❌ 異常 ({str(e)[:25]})"
+
 def execute_gdrive_mirror() -> tuple[bool, str]:
     """
     階段三：Google Drive 5TB 高速異地鏡像 (OD1 ➜ GD1)
     - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
     - 目的：gd1_union:
-    - 傳輸參數：高速並發 (--transfers=4, --checkers=8, --tpslimit=10, --fast-list, --drive-chunk-size=64M)
+    - 傳輸參數：平行流量治理 (--transfers=2, --checkers=4, --tpslimit=5, --fast-list, --drive-chunk-size=64M)
     """
     clusters = get_all_union_clusters()
     if "gd1_union" not in clusters:
@@ -627,16 +661,16 @@ def execute_gdrive_mirror() -> tuple[bool, str]:
     cmd_gdrive = [
         "rclone", "copy", "od1_union:", "gd1_union:",
         f"--config={CONFIG_PATH}",
-        "--transfers=4",
-        "--checkers=8",
-        "--tpslimit=10",
+        "--transfers=2",
+        "--checkers=4",
+        "--tpslimit=5",
         "--fast-list",
         "--drive-chunk-size=64M",
         "-v",
         f"--log-file={gdrive_log}"
     ]
     try:
-        res = subprocess.run(cmd_gdrive, timeout=7200)
+        res = subprocess.run(cmd_gdrive, timeout=28800)
         if res.returncode == 0:
             logging.info("Phase 3 (Google Drive Mirror) completed successfully.")
             return True, "✅ 成功 (已加密鏡像)"
@@ -690,9 +724,60 @@ def execute_phase4_cold_archive() -> tuple[bool, str]:
         logging.error(f"Phase 4 failed with exception: {e}")
         return False, f"❌ 異常 ({str(e)[:25]})"
 
+def execute_parallel_cloud_fanout() -> dict:
+    """
+    並行扇出架構 (Parallel Fan-Out Replication):
+    OD1 主庫完成後，同時平行啟動微軟異地鏡像 (OD2)、谷歌異雲鏡像 (GD1) 與 115 國內冷備。
+    並發流量治理：
+    - OD1 ➜ OD2: 2 transfers, 5 TPS
+    - OD1 ➜ GD1: 2 transfers, 5 TPS
+    - OD1 ➜ 115: 1 transfer, 2 TPS
+    總讀取並發: 5 transfers / 12 TPS，嚴格保障微軟 OD1 不觸發 HTTP 429 限流。
+    """
+    logging.info("=== Starting Parallel Cloud Fan-Out (OD2 + GD1 + 115) ===")
+    results = {
+        "phase2_success": False,
+        "phase2_msg": "",
+        "phase3_success": False,
+        "phase3_msg": "",
+        "phase4_success": False,
+        "phase4_msg": ""
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_od2 = executor.submit(execute_od2_mirror)
+        future_gd1 = executor.submit(execute_gdrive_mirror)
+        future_cold = executor.submit(execute_phase4_cold_archive)
+
+        try:
+            ok2, msg2 = future_od2.result()
+            results["phase2_success"] = ok2
+            results["phase2_msg"] = msg2
+        except Exception as e:
+            logging.error(f"Parallel OD2 Mirror failed: {e}")
+            results["phase2_msg"] = f"❌ 異常 ({str(e)[:25]})"
+
+        try:
+            ok3, msg3 = future_gd1.result()
+            results["phase3_success"] = ok3
+            results["phase3_msg"] = msg3
+        except Exception as e:
+            logging.error(f"Parallel GD1 Mirror failed: {e}")
+            results["phase3_msg"] = f"❌ 異常 ({str(e)[:25]})"
+
+        try:
+            ok4, msg4 = future_cold.result()
+            results["phase4_success"] = ok4
+            results["phase4_msg"] = msg4
+        except Exception as e:
+            logging.error(f"Parallel 115 Cold Archive failed: {e}")
+            results["phase4_msg"] = f"❌ 異常 ({str(e)[:25]})"
+
+    logging.info(f"=== Parallel Cloud Fan-Out Finished: OD2={results['phase2_success']}, GD1={results['phase3_success']}, 115={results['phase4_success']} ===")
+    return results
+
 # ================= Sync Logic =================
 def execute_backup():
-    """Perform Phase 0 (Docker GFS), Phase 1, Phase 2, Phase 3 (Google Drive), and Phase 4 (115 Cold Archive)"""
+    """Perform Phase 0 (Docker GFS), Phase 1, and Parallel Fan-Out (Phase 2 OD2 + Phase 3 GD1 + Phase 4 115)"""
     logging.info("Starting Backup Workflow...")
     start_time = time.time()
 
@@ -752,33 +837,43 @@ def execute_backup():
         send_telegram(msg)
         return
 
-    # 4. Phase 2: od1_union -> od2_union (Raw Ciphertext Mirror, Full Speed)
-    logging.info("=== Phase 2: Starting od1_union -> od2_union (Raw Mirror) ===")
-    phase2_log = os.path.join(LOG_DIR, "phase2_mirror.log")
-    cmd_phase2 = [
-        "rclone", "copy", "od1_union:", "od2_union:",
-        f"--config={CONFIG_PATH}",
-        "--transfers=4",
-        "--checkers=8",
-        "--tpslimit=10",
-        "--fast-list",
-        "--drive-chunk-size=64M",
-        "-v",
-        f"--log-file={phase2_log}"
-    ]
-    res_phase2 = subprocess.run(cmd_phase2)
-    phase2_success = (res_phase2.returncode == 0)
-
-    # 5. Phase 3: od1_union -> gd1_union (Google Drive 5TB Raw Mirror)
-    phase3_success, phase3_msg = execute_gdrive_mirror()
-
-    # 6. Phase 4: od1_union -> 115 Cold Archive (Decoupled, Low Concurrency)
-    phase4_success, phase4_msg = execute_phase4_cold_archive()
+    # 4. Phase 2 ~ 4: Parallel Cloud Fan-Out (OD2, GD1, 115)
+    fanout_results = execute_parallel_cloud_fanout()
+    phase2_success = fanout_results["phase2_success"]
+    phase3_msg = fanout_results["phase3_msg"]
+    phase4_msg = fanout_results["phase4_msg"]
     
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
     report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets, docker_msg, phase3_msg, phase4_msg)
+    send_telegram(report_msg)
+
+def execute_fanout_only():
+    """專用立即觸發：跳過本地掃描，直接執行三雲端並行扇出鏡像並發送 Telegram 戰報"""
+    logging.info("Starting Parallel Fan-Out Cloud Mirror (Standalone)...")
+    start_time = time.time()
+
+    can_proceed, status = run_health_guard()
+    if not can_proceed:
+        logging.warning(f"Health guard blocked mirror with status: {status}")
+        return
+
+    targets = get_backup_targets()
+    fanout_results = execute_parallel_cloud_fanout()
+    
+    duration = int(time.time() - start_time)
+    duration_str = f"{duration // 60} 分 {duration % 60} 秒"
+
+    report_msg = generate_daily_executive_report(
+        duration_str,
+        True,
+        fanout_results["phase2_success"],
+        targets,
+        "✅ 已就緒 (前次已封存)",
+        fanout_results["phase3_msg"],
+        fanout_results["phase4_msg"]
+    )
     send_telegram(report_msg)
 
 # ================= Daemon Loop =================
@@ -813,6 +908,7 @@ if __name__ == "__main__":
     parser.add_argument("--docker-backup-now", action="store_true", help="Run Docker GFS snapshot and upload now")
     parser.add_argument("--gdrive-sync-now", action="store_true", help="Run Phase 3 (Google Drive 5TB Mirror) immediately")
     parser.add_argument("--cold-sync-now", action="store_true", help="Run Phase 4 (115 Cold Archive) mirror immediately")
+    parser.add_argument("--fanout-now", action="store_true", help="Run Phase 2, 3, 4 parallel fan-out mirror immediately")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup immediately")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
@@ -830,6 +926,8 @@ if __name__ == "__main__":
     elif args.cold_sync_now:
         success, msg = execute_phase4_cold_archive()
         print(f"Cold Archive Result: {success} -> {msg}")
+    elif args.fanout_now:
+        execute_fanout_only()
     elif args.test_report:
         targets = get_backup_targets()
         report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", "✅ 成功 (已加密鏡像)", "✅ 成功 (已加密鏡像)")

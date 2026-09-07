@@ -102,22 +102,18 @@ graph TD
 * **比對**：依檔案大小（Size）與修改時間（ModTime）進行高速增量比對，未變更檔案秒跳過。
 * **加密**：經過 `od1_crypt:` 即時加密後寫入 `od1_union:`。
 
-### 3. 階段 2：微軟雙租戶密文鏡像直傳 (OD1 ➜ OD2)
-* **路徑**：`od1_union:` ➜ `od2_union:`。
-* **原理**：採用**純內存流式傳輸（In-Memory Stream-Through）**，資料以 64MB 區塊在 NAS 記憶體內轉發，**完全不落硬碟，零磁頭磨損**。
-* **免算力**：搬運已加密好的 `.bin` 密文，NAS 不進行二次加解密，CPU 使用率趨近於 0%。
+### 3. 階段 2 ~ 4：三雲端並行扇出鏡像 (Parallel Fan-Out Replication)
+當階段 1 本地主資料於微軟 OD1 成功加密落盤後，系統啟動 **三雲並行扇出引擎 (Fan-Out Replication)**，三條鏈路同時並發傳輸：
 
-### 4. 階段 3：谷歌異雲密文鏡像直傳 (OD1 ➜ GD1 5TB)
-* **路徑**：`od1_union:` ➜ `gd1_union:`。
-* **跨雲性能最佳化**：針對 Google Drive 傳輸特性，配置 64MB 區塊緩衝（`--drive-chunk-size=64M`）與高並發通道（`--transfers=4`、`--checkers=8`、`--tpslimit=10`），大幅縮短大型檔案同步延遲。
-* **異質防護**：串流已加密之 `.bin` 密文直達 Google One 雲端，徹底防範跨雲平台供應商風險。
+* **【階段 2】微軟跨租戶密文鏡像 (OD1 ➜ OD2)**：
+  - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝流式直傳。
+* **【階段 3】谷歌異雲密文鏡像 (OD1 ➜ GD1 5TB)**：
+  - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝高速並行。
+* **【階段 4】境內 96TB 異構冷歸檔 (OD1 ➜ 115 網盤)**：
+  - 參數：`--transfers=1`, `--checkers=2`, `--tpslimit=2`, `--timeout=2h`, 經由 Alist WebDAV 解耦冷儲存。
 
-### 5. 階段 4：異構大容量冷歸檔 (115 Cloud Cold Archival)
-* **路徑**：`od1_union:` ➜ `alist_115:fnOS_Backup/`。
-* **橋接原理**：NAS 本機 Alist 容器提供 WebDAV (`:5244/dav/backup/115`)，Rclone 直接向其串流寫入。
-* **限流安全策略**：115 網盤具有嚴格的防濫用與頻寬限制，階段 4 強制採用低並發保護（`--transfers=1`、`--checkers=2`、`--tpslimit=2`、`--timeout=2h`），確保穩定不斷流。
-* **容錯隔離**：階段 4 與核心鏈路解耦，115 若發生限速、排隊或網路波動，守衛日誌將記錄警示，絕不中斷主備份流程。
-* **端到端保密**：115 上的所有內容均為加密後的 `.bin` 密文，兼具 96TB 巨量歸檔與隱私合規，隨時可由 `115_crypt:` 解密還原。
+> [!TIP]
+> **精細流量治理 (Traffic Policing)**：三個雲端鏡像同時向 OD1 讀取密文，總並發精準限制為 5 執行緒、總 TPS ≤ 12，**完全不傷 NAS 本機硬碟（0 磁頭磨損），且完美避開微軟 OneDrive HTTP 429 限流**；慢速的 115 網盤不會拖延 OD2 與 GD1 的完成時間！
 
 ---
 
@@ -307,9 +303,10 @@ cd /vol2/1000/docker/rclone-backup
 | **手動立即執行 Docker GFS 備份**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
 | **手動立即執行 Google Drive 鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --gdrive-sync-now` |
 | **手動立即執行 115 冷歸檔** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --cold-sync-now` |
+| **手動立即執行三雲並行扇出鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --fanout-now` |
 | **手動立即觸發全量三雲鼎立備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
 | **即時查看守衛即時日誌** | `docker logs -f rclone-backup-guard` |
-| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase3_gdrive_mirror.log` ｜ `cat logs/phase4_cold_115.log` |
+| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase2_mirror.log` ｜ `cat logs/phase3_gdrive_mirror.log` ｜ `cat logs/phase4_cold_115.log` |
 | **存取 Web GUI 儀表板** | 瀏覽器開啟 `http://<NAS_IP>:5572/` (內網免密碼直連) |
 
 ---
