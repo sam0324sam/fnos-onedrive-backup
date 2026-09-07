@@ -1,6 +1,6 @@
-# 🛡️ fnOS 5-4-3 企業級跨雲端三雲鼎立加密備份系統規劃書
-> **Architecture & Operation Blueprint for Enterprise-Grade 5-4-3 Triple-Cloud Backup Solution**  
-> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Alist + Python SRE 守衛 ｜ 版本：v4.0 (5-4-3 Triple-Cloud Edition)*
+# 🛡️ fnOS 4-3-2 企業級跨雲端雙巨頭極速加密備份系統規劃書
+> **Architecture & Operation Blueprint for Enterprise-Grade 4-3-2 Dual-Cloud Backup Solution**  
+> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Python SRE 守衛 ｜ 版本：v4.1 (4-3-2 Dual-Cloud Edition)*
 
 ---
 
@@ -19,26 +19,25 @@
 
 ## 一、 系統背景與設計原則
 
-本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、跨雲異質、異構冷備、零運維**的 5-4-3 雲端自動化備份體系。
+本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、跨雲異質、極速扇出、零運維**的 4-3-2 雙雲端自動化備份體系。
 
-### 🌟 核心目標 (5-4-3 跨雲端三雲鼎立備份鐵律)
-* **5 份資料副本**：本地原始資料 + OD1 雲端主儲存 + OD2 雲端異地鏡像 + GD1 谷歌異雲鏡像 + 115 網盤 96TB 境內冷存檔。
-* **4 種不同介質/體系**：本地實體 NVMe/HDD 陣列 + 微軟 M365 國際公有雲 + 谷歌 Google Cloud 國際公有雲 + 115 境內大容量冷儲存網盤。
-* **3 處實體異地/供應商隔離**：
+### 🌟 核心目標 (4-3-2 跨雲端雙巨頭備份鐵律)
+* **4 份資料副本**：本地原始資料 + OD1 雲端主儲存 + OD2 雲端異地鏡像 + GD1 谷歌異雲鏡像。
+* **3 種不同介質/體系**：本地實體 NVMe/HDD 陣列 + 微軟 M365 國際公有雲 + 谷歌 Google Cloud 國際公有雲。
+* **2 處實體異地/供應商隔離**：
   1. **微軟跨租戶隔離 (Cross-Tenant)**（海外/香港節點：`3lym23` ➜ `auvooo`）
-  2. **谷歌跨雲端隔離 (Cross-Cloud Provider)**（Google One / Google Cloud 全球高可用節點）
-  3. **115 境內節點隔離**（境內獨立機房超大容量冷儲存），徹底規避單一雲端供應商斷供、風控封鎖或國際海纜斷裂風險。
+  2. **谷歌跨雲端隔離 (Cross-Cloud Provider)**（Google One / Google Cloud 全球高可用節點），徹底規避單一雲端供應商斷供、帳號風控封鎖風險。
 
 ### 💎 設計原則
-1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，微軟、谷歌與 115 均無法分析檔案內容，100% 免疫國內外網盤特徵審查與屏蔽。
+1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，微軟與谷歌均無法分析檔案內容，100% 免疫特徵審查與屏蔽。
 2. **只增不減 (Append-Only Copy)**：本地誤刪或遭受勒索病毒加密修改時，雲端歷史檔案**永不自動刪除**。
 3. **冷熱資料分離 (Storage Tiering)**：
    * 守衛程式與高頻日誌置於 **`/vol2` (NVMe 高速 SSD)**，避免日常巡檢喚醒硬碟。
    * 資料來源讀取 **`/vol1` (22TB RAID 10 大容量機械陣列)**，兼顧極速讀寫與延長硬碟壽命。
 4. **流式跨雲直傳 (Zero-CPU Cloud-to-Cloud Streaming)**：
    * 核心鏈路（OD1 ➜ OD2、OD1 ➜ GD1）直接串流傳輸 XSalsa20 密文，0 NAS 硬碟讀寫，0 二次加解密，極速並發達成 RPO 目標。
-5. **解耦與隔離冷歸檔 (Decoupled Cold Archival)**：
-   * 異構冷鏈路（115 網盤）在核心公有雲完成後接續執行，採用低並發安全限流參數（`--transfers=1`），其限速或波動不阻塞主備份流程。
+5. **雙雲並行扇出 (Parallel Dual-Cloud Fan-Out)**：
+   * OD1 完成後，同時啟動 OD2 與 GD1 雙向並發鏡像，流量精細控制（總並發 4 執行緒 / 10 TPS），杜絕 API 限流並最大化頻寬利用率。
 6. **零寫死自適應 (Zero-Hardcoding)**：自動探索本地 UID 使用者目錄、自動掃描多雲合流池、動態生成行動端最適排版戰報。
 
 ---
@@ -51,7 +50,6 @@ graph TD
         SSD["/vol2 NVMe 應用池 (890GB)<br>• rclone-backup 容器<br>• 所有 Docker 設定檔 (1GB)"]
         HDD["/vol1 HDD 主資料池 (22TB RAID10)<br>• 1000 (sam), 1001 (hiyoko)<br>• 1002 (miya), @team"]
         Guard["rclone-backup-guard<br>(Python 3 智慧守衛進程)"]
-        Alist["Alist 容器 (:5244)<br>(115 WebDAV 橋接器)"]
         WebGUI["rclone-web-dashboard<br>(Port 5572 Web 儀表板)"]
     end
 
@@ -63,14 +61,10 @@ graph TD
         Crypt["od1_crypt (XSalsa20 客戶端加密)<br>目錄明文 ｜ 檔案內容 .bin 密文"]
     end
 
-    subgraph Triple_Cloud ["☁️ 三雲鼎立跨雲異地容災 (OneDrive 5TB x 2 + Google Drive 5TB)"]
+    subgraph Dual_Cloud ["☁️ 雙巨頭跨雲異地容災 (OneDrive 5TB x 2 + Google Drive 5TB)"]
         OD1["☁️ OD1 主儲存池 (od1_union)<br>租戶: 3lym23.onmicrosoft.com<br>(5.0 TB 原生空間，可循序擴充)"]
         OD2["☁️ OD2 鏡像副本 (od2_union)<br>租戶: auvooo.cn<br>(5.0 TB 獨立租戶，跨域容災)"]
         GD1["☁️ GD1 谷歌鏡像 (gd1_union)<br>帳號: sam0324sam.india@gmail.com<br>(5.0 TB Google One 獨立跨雲)"]
-    end
-
-    subgraph Cold_Archive ["❄️ 異構大容量冷存檔 (115 網盤 96TB)"]
-        C115["☁️ 115 網盤 (alist_115:fnOS_Backup/)<br>• 經由 Alist WebDAV 橋接<br>• 全程儲存 XSalsa20 .bin 密文<br>• 可由 115_crypt 隨時解密還原"]
     end
 
     SSD -.->|快照打包| Tar
@@ -79,7 +73,6 @@ graph TD
     Crypt -->|只增不減| OD1
     OD1 ==>|【階段 2】微軟跨租戶密文直傳<br>0 落盤 ｜ 0 CPU 運算| OD2
     OD1 ==>|【階段 3】谷歌異雲密文直傳<br>64MB 塊 ｜ 高速並發| GD1
-    OD1 -.->|【階段 4】國內冷備串流<br>低並發限流保護| Alist -.-> C115
 
     Guard -->|每日 02:00 / 巡檢告警| TG["📱 Telegram 機器人 (@msgMaster_bot)"]
 ```
@@ -102,18 +95,16 @@ graph TD
 * **比對**：依檔案大小（Size）與修改時間（ModTime）進行高速增量比對，未變更檔案秒跳過。
 * **加密**：經過 `od1_crypt:` 即時加密後寫入 `od1_union:`。
 
-### 3. 階段 2 ~ 4：三雲端並行扇出鏡像 (Parallel Fan-Out Replication)
-當階段 1 本地主資料於微軟 OD1 成功加密落盤後，系統啟動 **三雲並行扇出引擎 (Fan-Out Replication)**，三條鏈路同時並發傳輸：
+### 3. 階段 2 & 3：雙雲端並行扇出鏡像 (Parallel Dual-Cloud Fan-Out Replication)
+當階段 1 本地主資料於微軟 OD1 成功加密落盤後，系統啟動 **雙雲端並行扇出引擎 (Fan-Out Replication)**，兩條鏈路同時並發傳輸：
 
 * **【階段 2】微軟跨租戶密文鏡像 (OD1 ➜ OD2)**：
   - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝流式直傳。
 * **【階段 3】谷歌異雲密文鏡像 (OD1 ➜ GD1 5TB)**：
   - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝高速並行。
-* **【階段 4】境內 96TB 異構冷歸檔 (OD1 ➜ 115 網盤)**：
-  - 參數：`--transfers=1`, `--checkers=2`, `--tpslimit=2`, `--timeout=2h`, 經由 Alist WebDAV 解耦冷儲存。
 
 > [!TIP]
-> **精細流量治理 (Traffic Policing)**：三個雲端鏡像同時向 OD1 讀取密文，總並發精準限制為 5 執行緒、總 TPS ≤ 12，**完全不傷 NAS 本機硬碟（0 磁頭磨損），且完美避開微軟 OneDrive HTTP 429 限流**；慢速的 115 網盤不會拖延 OD2 與 GD1 的完成時間！
+> **精細流量治理 (Traffic Policing)**：兩個雲端鏡像同時向 OD1 讀取密文，總並發精準限制為 4 執行緒、總 TPS ≤ 10，**完全不傷 NAS 本機硬碟（0 磁頭磨損），且完美避開微軟 OneDrive HTTP 429 限流**，兼顧極速與系統韌性！
 
 ---
 
@@ -158,7 +149,7 @@ graph TD
 
 * **總快照上限**：約 **34 份**。
 * **空間耗費**：總計僅約 **14 ~ 16 GB**（不到 5TB 的 0.3%）。
-* **三雲端同步修剪**：演算法同時向 `od1_crypt`、`od2_crypt` 與 `gd1_crypt` 執行過期淘汰，確保存放空間整齊一致。
+* **雙雲端同步修剪**：演算法同時向 `od1_crypt`、`od2_crypt` 與 `gd1_crypt` 執行過期淘汰，確保存放空間整齊一致。
 
 ---
 
@@ -192,7 +183,7 @@ graph TD
 Telegram 戰報採用手機最適化垂直結構，動態讀取 Linux 核心容量與跨雲 API，排版範例：
 
 ```html
-📊 【fnOS 5-4-3 跨雲端三雲鼎立每日維運日報】
+📊 【fnOS 4-3-2 雙雲端異地每日維運日報】
 📅 報告時間：2026-09-07 02:08:15
 
 🖥️ 本地資料池 (/vol1)
@@ -213,26 +204,22 @@ Telegram 戰報採用手機最適化垂直結構，動態讀取 Linux 核心容�
   └ od2_1 🟢 剩餘 4.3 TB
 
 ☁️ GD1 谷歌鏡像 (gd1_union)
-• 聚合總量：5.0 TB ｜ 剩餘可用：5.0 TB
-• 目前水位：0.0 B (0.0%)
+• 聚合總量：5.0 TB ｜ 剩餘可用：4.3 TB
+• 目前水位：714.2 GB (14.0%)
 • 節點清單：
-  └ gd1_1 🟢 剩餘 5.0 TB
-
-☁️ 115 異構冷歸檔池 (alist_115)
-• 網盤容量：96.0 TB ｜ 狀態：🟢 在線連通 (Alist WebDAV)
-• 密文路徑：alist_115:fnOS_Backup/ (XSalsa20 端到端保密)
+  └ gd1_1 🟢 剩餘 4.3 TB
 
 ⚡ 本次備份傳輸總結
 • 階段一 (NAS ➜ OD1 加密)：✅ 成功
 • 階段二 (OD1 ➜ OD2 鏡像)：✅ 成功
 • 階段三 (OD1 ➜ GD1 鏡像)：✅ 成功 (已加密鏡像)
-• 階段四 (OD1 ➜ 115 冷歸檔)：✅ 成功 (已加密鏡像)
 • 容器快照 (Docker GFS)：✅ 已封存 (496 MB，GFS 階梯保留中)
+• 傳輸架構：⚡ 雙雲扇出並行 (Parallel Dual-Cloud Fan-Out)
 • 執行總耗時：3 分 45 秒
 
-🛡️ 5-4-3 容災鏈路狀態
-• 鏈路檢核：🛡️ 完全合規 (5-4-3 Triple-Cloud Verified)
-• 拓撲節點：[本地陣列] 🟢 ➜ [OD1 微軟主本] 🟢 ➜ [OD2 微軟鏡像] 🟢 ➜ [GD1 谷歌鏡像] 🟢 ➜ [115 國內冷備] 🟢
+🛡️ 容災拓撲狀態
+• 鏈路檢核：🛡️ 完全合規 (4-3-2 Dual-Cloud Verified)
+• 拓撲節點：[本地陣列] 🟢 ➜ [OD1 微軟主本] 🟢 ➜ [OD2 微軟鏡像] 🟢 ➜ [GD1 谷歌鏡像] 🟢
 
 ⏰ 下次例行備份：每日 02:00
 ```
@@ -268,14 +255,7 @@ tar -zxvf /tmp/docker_snapshot_20260906.tar.gz -C /vol2/1000/docker/
 docker exec -it rclone-backup-guard rclone copy "gd1_crypt:1000/MyDocuments" "/data/1000/MyDocuments_Restored" --config=/config/rclone/rclone.conf -P
 ```
 
-### 情境 4：國際海纜斷裂或公有雲不可抗力時，從 115 網盤解密還原
-若國際連線中斷，可隨時透過境內高速直連之本機 `115_crypt:` 自動解密還原：
-```bash
-# 從 115 網盤解密還原指定使用者資料夾
-docker exec -it rclone-backup-guard rclone copy "115_crypt:1000/MyDocuments" "/data/1000/MyDocuments_Restored" --config=/config/rclone/rclone.conf -P
-```
-
-### 情境 5：NAS 整機損毀或新機冷啟動復原 (Bare-metal Recovery)
+### 情境 4：NAS 整機損毀或新機冷啟動復原 (Bare-metal Recovery)
 1. 在新機器安裝 Docker 與 Git。
 2. Clone 本倉庫：
    ```bash
@@ -302,11 +282,10 @@ cd /vol2/1000/docker/rclone-backup
 | **手動測試 Telegram 戰報** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --test-report` |
 | **手動立即執行 Docker GFS 備份**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
 | **手動立即執行 Google Drive 鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --gdrive-sync-now` |
-| **手動立即執行 115 冷歸檔** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --cold-sync-now` |
-| **手動立即執行三雲並行扇出鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --fanout-now` |
-| **手動立即觸發全量三雲鼎立備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
+| **手動立即執行雙雲並行扇出鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --fanout-now` |
+| **手動立即觸發全量雙雲極速備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
 | **即時查看守衛即時日誌** | `docker logs -f rclone-backup-guard` |
-| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase2_mirror.log` ｜ `cat logs/phase3_gdrive_mirror.log` ｜ `cat logs/phase4_cold_115.log` |
+| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase2_mirror.log` ｜ `cat logs/phase3_gdrive_mirror.log` |
 | **存取 Web GUI 儀表板** | 瀏覽器開啟 `http://<NAS_IP>:5572/` (內網免密碼直連) |
 
 ---
