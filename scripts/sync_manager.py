@@ -343,7 +343,7 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
         transfer_lines.append(f"• 節點三 (本地 ➜ GD1 谷歌鏡像)：{phase3_display}")
     if docker_msg:
         transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
-    transfer_lines.append("• 傳輸架構：⚡ 本地直接串流多雲 (Direct Multi-Cloud Streaming)")
+    transfer_lines.append("• 傳輸架構：⚡ 多雲全並行直接直灌 (Concurrent Multi-Cloud Streaming)")
     transfer_lines.append(f"• 執行總耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
@@ -653,21 +653,18 @@ def execute_backup():
     targets = get_backup_targets()
     logging.info(f"Discovered backup target folders: {targets}")
 
-    # 3. 節點一：本地 NAS ➜ od1_crypt (微軟 OD1 主儲存)
-    logging.info("=== Node 1: Syncing Local -> OD1 (Microsoft Primary) ===")
-    ok1, msg1 = sync_local_to_cloud("od1_crypt", "OD1 微軟主儲存", targets, "sync_od1")
-
-    # 4. 節點二：本地 NAS ➜ od2_crypt (微軟 OD2 鏡像副本)
-    logging.info("=== Node 2: Syncing Local -> OD2 (Microsoft Mirror) ===")
-    ok2, msg2 = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
-
-    # 5. 節點三：本地 NAS ➜ gd1_crypt (Google Drive 5TB 鏡像副本)
     has_gdrive = "gd1_union" in get_all_union_clusters()
-    if has_gdrive:
-        logging.info("=== Node 3: Syncing Local -> GD1 (Google Drive Mirror) ===")
-        ok3, msg3 = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
-    else:
-        ok3, msg3 = True, "未配置略過"
+
+    # 3. 三雲端全並行直灌 (OD1, OD2, GD1 同時並行)
+    logging.info("=== Starting Concurrent Direct Sync to Multi-Cloud (OD1, OD2, GD1) ===")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_od1 = executor.submit(sync_local_to_cloud, "od1_crypt", "OD1 微軟主儲存", targets, "sync_od1")
+        future_od2 = executor.submit(sync_local_to_cloud, "od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
+        future_gd1 = executor.submit(sync_local_to_cloud, "gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1") if has_gdrive else None
+
+        ok1, msg1 = future_od1.result()
+        ok2, msg2 = future_od2.result()
+        ok3, msg3 = future_gd1.result() if future_gd1 else (True, "未配置略過")
 
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
@@ -676,8 +673,8 @@ def execute_backup():
     send_telegram(report_msg)
 
 def execute_mirrors_only():
-    """專用立即觸發：本地直接同步鏡像雲端 (OD2 + GD1)"""
-    logging.info("Starting Direct Local -> Mirrors (OD2 + GD1)...")
+    """專用立即觸發：本地直接並行同步鏡像雲端 (OD2 + GD1 全並行)"""
+    logging.info("Starting Direct Local -> Mirrors Concurrent Sync (OD2 + GD1)...")
     start_time = time.time()
 
     can_proceed, status = run_health_guard()
@@ -688,13 +685,15 @@ def execute_mirrors_only():
     targets = get_backup_targets()
     logging.info(f"Discovered backup target folders: {targets}")
 
-    ok2, msg2 = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
-    
     has_gdrive = "gd1_union" in get_all_union_clusters()
-    if has_gdrive:
-        ok3, msg3 = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
-    else:
-        ok3, msg3 = True, "未配置略過"
+
+    logging.info("=== Starting Concurrent Direct Sync to Mirrors (OD2 & GD1) ===")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_od2 = executor.submit(sync_local_to_cloud, "od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
+        future_gd1 = executor.submit(sync_local_to_cloud, "gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1") if has_gdrive else None
+
+        ok2, msg2 = future_od2.result()
+        ok3, msg3 = future_gd1.result() if future_gd1 else (True, "未配置略過")
 
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
