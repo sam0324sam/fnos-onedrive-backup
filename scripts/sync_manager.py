@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fnOS 4-3-2 Dual-Cloud Enterprise Backup and Health Guard
-- Phase 0: Docker GFS Snapshots -> od1_crypt (14 Daily, 8 Weekly, 12 Monthly)
-- Phase 1: Local NAS (/vol1) -> od1_crypt (Incremental, XSalsa20 Encrypted)
-- Phase 2: od1_union -> od2_union (Microsoft Cross-Tenant Raw Mirror)
-- Phase 3: od1_union -> gd1_union (Google Drive 5TB Cross-Cloud Raw Mirror)
+fnOS 4-3-2 Dual-Cloud Enterprise Direct Backup and Health Guard
+- Phase 0: Docker GFS Snapshots -> Multi-Cloud (OD1, OD2, GD1)
+- Node 1: Local NAS (/vol1) -> od1_crypt (Microsoft Primary, XSalsa20 Encrypted)
+- Node 2: Local NAS (/vol1) -> od2_crypt (Microsoft Mirror, XSalsa20 Encrypted)
+- Node 3: Local NAS (/vol1) -> gd1_crypt (Google Drive 5TB Mirror, XSalsa20 Encrypted)
 - Pre-flight Health and Capacity Guard with Telegram Executive Alerting
 """
 
@@ -335,15 +335,15 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     phase2_status = "✅ 成功" if phase2_success else "❌ 失敗"
     transfer_lines = [
         "⚡ <b>本次備份傳輸總結</b>",
-        f"• 階段一 (NAS ➜ OD1 加密)：{phase1_status}",
-        f"• 階段二 (OD1 ➜ OD2 鏡像)：{phase2_status}"
+        f"• 節點一 (本地 ➜ OD1 微軟主本)：{phase1_status}",
+        f"• 節點二 (本地 ➜ OD2 微軟鏡像)：{phase2_status}"
     ]
     if has_gdrive:
         phase3_display = phase3_msg if phase3_msg else "✅ 成功"
-        transfer_lines.append(f"• 階段三 (OD1 ➜ GD1 鏡像)：{phase3_display}")
+        transfer_lines.append(f"• 節點三 (本地 ➜ GD1 谷歌鏡像)：{phase3_display}")
     if docker_msg:
         transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
-    transfer_lines.append("• 傳輸架構：⚡ 雙雲扇出並行 (Parallel Dual-Cloud Fan-Out)")
+    transfer_lines.append("• 傳輸架構：⚡ 本地直接串流多雲 (Direct Multi-Cloud Streaming)")
     transfer_lines.append(f"• 執行總耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
@@ -351,12 +351,12 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     if has_gdrive:
         is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
         sla_badge = "🛡️ <b>完全合規 (4-3-2 Dual-Cloud Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
-        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ➜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'} ➜ [GD1 谷歌鏡像] {'🟢' if all_clusters_ok else '🔴'}"
+        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ｜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'} ｜ [GD1 谷歌鏡像] {'🟢' if all_clusters_ok else '🔴'}"
         title_prefix = "【fnOS 4-3-2 雙雲端異地每日維運日報】"
     else:
         is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
         sla_badge = "🛡️ <b>完全合規 (3-2-1 Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
-        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ➜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'}"
+        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ｜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'}"
         title_prefix = "【fnOS 3-2-1 雙微軟租戶每日維運日報】"
 
     sla_sec = (
@@ -542,16 +542,32 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
         return False, f"打包失敗: {err}"
 
     archive_size_mb = os.path.getsize(staging_archive) / (1024 * 1024)
-    logging.info(f"Docker archive created successfully ({archive_size_mb:.1f} MB). Uploading to od1_crypt:docker_snapshots/...")
+    logging.info(f"Docker archive created successfully ({archive_size_mb:.1f} MB). Uploading to multi-cloud...")
 
-    upload_cmd = [
-        "rclone", "copy", staging_archive, "od1_crypt:docker_snapshots/",
-        f"--config={CONFIG_PATH}",
-        "--drive-chunk-size=64M",
-        "--fast-list",
-        "-v"
+    # 本地直接分發快照至三雲加密目錄
+    destinations = [
+        ("od1_crypt:docker_snapshots/", "OD1 微軟主本"),
+        ("od2_crypt:docker_snapshots/", "OD2 微軟鏡像")
     ]
-    res_upload = subprocess.run(upload_cmd, capture_output=True, text=True)
+    if "gd1_union" in get_all_union_clusters():
+        destinations.append(("gd1_crypt:docker_snapshots/", "GD1 谷歌鏡像"))
+
+    upload_success = True
+    for dst, label in destinations:
+        upload_cmd = [
+            "rclone", "copy", staging_archive, dst,
+            f"--config={CONFIG_PATH}",
+            "--drive-chunk-size=64M",
+            "--fast-list",
+            "-v"
+        ]
+        res_upload = subprocess.run(upload_cmd, capture_output=True, text=True)
+        if res_upload.returncode != 0:
+            err = res_upload.stderr.strip() or f"Upload to {dst} failed"
+            logging.error(f"Failed to upload docker snapshot to {label} ({dst}): {err}")
+            upload_success = False
+        else:
+            logging.info(f"Docker snapshot uploaded to {label} ({dst}) successfully.")
 
     if os.path.exists(staging_archive):
         try:
@@ -559,161 +575,37 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
         except Exception:
             pass
 
-    if res_upload.returncode != 0:
-        err = res_upload.stderr.strip() or "Rclone upload failed"
-        logging.error(f"Failed to upload docker snapshot: {err}")
-        return False, f"上傳失敗: {err}"
-
-    logging.info(f"Docker snapshot {archive_name} uploaded successfully ({archive_size_mb:.1f} MB).")
-
     # 執行多集群 GFS 梯次清理
     prune_gfs_snapshots("od1_crypt:docker_snapshots")
     prune_gfs_snapshots("od2_crypt:docker_snapshots")
     if "gd1_union" in get_all_union_clusters():
         prune_gfs_snapshots("gd1_crypt:docker_snapshots")
 
+    if not upload_success:
+        return False, "部分雲端快照上傳失敗"
+
     return True, f"✅ 已封存 ({archive_size_mb:.1f} MB, GFS 階梯保留中)"
 
-def execute_od2_mirror() -> tuple[bool, str]:
+def sync_local_to_cloud(target_crypt: str, cloud_label: str, targets: list, log_prefix: str) -> tuple[bool, str]:
     """
-    階段二：微軟雙租戶高速異地鏡像 (OD1 ➜ OD2)
-    - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
-    - 目的：od2_union:
-    - 傳輸參數：平行流量治理 (--transfers=2, --checkers=4, --tpslimit=5, --fast-list, --drive-chunk-size=64M)
+    通用本地直接串流加密同步 (Direct Local-to-Cloud Stream Sync)
+    - 來源：本地 /data/{folder} (讀取本地 RAID 10，零 API 往返延遲)
+    - 目的：{target_crypt}:{folder} (內存 XSalsa20 即時串流加密)
+    - 參數：高並發流式直傳 (--transfers=4, --checkers=8, --tpslimit=10, --fast-list, --drive-chunk-size=64M)
     """
-    logging.info("=== Phase 2: Starting od1_union -> od2_union (Microsoft Raw Mirror) ===")
-    phase2_log = os.path.join(LOG_DIR, "phase2_mirror.log")
-    cmd_phase2 = [
-        "rclone", "copy", "od1_union:", "od2_union:",
-        f"--config={CONFIG_PATH}",
-        "--transfers=2",
-        "--checkers=4",
-        "--tpslimit=5",
-        "--fast-list",
-        "--drive-chunk-size=64M",
-        "-v",
-        f"--log-file={phase2_log}"
-    ]
-    try:
-        res = subprocess.run(cmd_phase2, timeout=28800)
-        if res.returncode == 0:
-            logging.info("Phase 2 (OD2 Mirror) completed successfully.")
-            return True, "✅ 成功 (已加密鏡像)"
-        else:
-            logging.warning(f"Phase 2 (OD2 Mirror) exited with code {res.returncode}")
-            return False, f"❌ 失敗 (Code {res.returncode})"
-    except Exception as e:
-        logging.error(f"Phase 2 (OD2 Mirror) failed: {e}")
-        return False, f"❌ 異常 ({str(e)[:25]})"
-
-def execute_gdrive_mirror() -> tuple[bool, str]:
-    """
-    階段三：Google Drive 5TB 高速異地鏡像 (OD1 ➜ GD1)
-    - 來源：od1_union: (直接串流 XSalsa20 密文，0 NAS CPU 負擔)
-    - 目的：gd1_union:
-    - 傳輸參數：平行流量治理 (--transfers=2, --checkers=4, --tpslimit=5, --fast-list, --drive-chunk-size=64M)
-    """
-    clusters = get_all_union_clusters()
-    if "gd1_union" not in clusters:
-        return True, "未配置略過"
-
-    logging.info("=== Phase 3: Starting od1_union -> gd1_union (Google Drive Raw Mirror) ===")
-    gdrive_log = os.path.join(LOG_DIR, "phase3_gdrive_mirror.log")
-    cmd_gdrive = [
-        "rclone", "copy", "od1_union:", "gd1_union:",
-        f"--config={CONFIG_PATH}",
-        "--transfers=2",
-        "--checkers=4",
-        "--tpslimit=5",
-        "--fast-list",
-        "--drive-chunk-size=64M",
-        "-v",
-        f"--log-file={gdrive_log}"
-    ]
-    try:
-        res = subprocess.run(cmd_gdrive, timeout=28800)
-        if res.returncode == 0:
-            logging.info("Phase 3 (Google Drive Mirror) completed successfully.")
-            return True, "✅ 成功 (已加密鏡像)"
-        else:
-            logging.warning(f"Phase 3 (Google Drive Mirror) exited with code {res.returncode}")
-            return False, f"❌ 失敗 (Code {res.returncode})"
-    except Exception as e:
-        logging.error(f"Phase 3 (Google Drive Mirror) failed: {e}")
-        return False, f"❌ 異常 ({str(e)[:25]})"
-
-def execute_parallel_cloud_fanout() -> dict:
-    """
-    雙雲端並行扇出架構 (Dual-Cloud Parallel Fan-Out Replication):
-    OD1 主庫完成後，同時平行啟動微軟異地鏡像 (OD2) 與谷歌異雲鏡像 (GD1)。
-    並發流量治理：
-    - OD1 ➜ OD2: 2 transfers, 5 TPS
-    - OD1 ➜ GD1: 2 transfers, 5 TPS
-    總讀取並發: 4 transfers / 10 TPS，嚴格保障微軟 OD1 不觸發 HTTP 429 限流。
-    """
-    logging.info("=== Starting Dual-Cloud Parallel Fan-Out (OD2 + GD1) ===")
-    results = {
-        "phase2_success": False,
-        "phase2_msg": "",
-        "phase3_success": False,
-        "phase3_msg": ""
-    }
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_od2 = executor.submit(execute_od2_mirror)
-        future_gd1 = executor.submit(execute_gdrive_mirror)
-
-        try:
-            ok2, msg2 = future_od2.result()
-            results["phase2_success"] = ok2
-            results["phase2_msg"] = msg2
-        except Exception as e:
-            logging.error(f"Parallel OD2 Mirror failed: {e}")
-            results["phase2_msg"] = f"❌ 異常 ({str(e)[:25]})"
-
-        try:
-            ok3, msg3 = future_gd1.result()
-            results["phase3_success"] = ok3
-            results["phase3_msg"] = msg3
-        except Exception as e:
-            logging.error(f"Parallel GD1 Mirror failed: {e}")
-            results["phase3_msg"] = f"❌ 異常 ({str(e)[:25]})"
-
-    logging.info(f"=== Dual-Cloud Parallel Fan-Out Finished: OD2={results['phase2_success']}, GD1={results['phase3_success']} ===")
-    return results
-
-# ================= Sync Logic =================
-def execute_backup():
-    """Perform Phase 0 (Docker GFS), Phase 1, and Parallel Fan-Out (Phase 2 OD2 + Phase 3 GD1)"""
-    logging.info("Starting Backup Workflow...")
-    start_time = time.time()
-
-    # 1. Health Guard Pre-check
-    can_proceed, status = run_health_guard()
-    if not can_proceed:
-        logging.warning(f"Health guard blocked backup with status: {status}")
-        return
-
-    # 2. Phase 0: Docker GFS Snapshot
-    logging.info("=== Phase 0: Starting Docker GFS Snapshot ===")
-    docker_success, docker_msg = execute_docker_gfs_backup()
-
-    # 3. Phase 1: NAS -> od1_crypt
-    logging.info("=== Phase 1: Starting NAS -> od1_crypt ===")
-    phase1_success = True
-    phase1_details = []
-
-    targets = get_backup_targets()
-    logging.info(f"Discovered backup target folders: {targets}")
+    logging.info(f"=== Starting Direct Local -> {target_crypt} ({cloud_label}) Sync ===")
+    all_success = True
+    failed_folders = []
 
     for folder in targets:
         src_path = f"/data/{folder}"
         if not os.path.exists(src_path):
             logging.info(f"Source folder {src_path} does not exist, skipping.")
             continue
-        
-        dst_remote = f"od1_crypt:{folder}"
-        log_file = os.path.join(LOG_DIR, f"phase1_{folder}.log")
-        
+
+        dst_remote = f"{target_crypt}:{folder}"
+        log_file = os.path.join(LOG_DIR, f"{log_prefix}_{folder}.log")
+
         cmd = [
             "rclone", "copy", src_path, dst_remote,
             f"--config={CONFIG_PATH}",
@@ -728,35 +620,64 @@ def execute_backup():
             "-v",
             f"--log-file={log_file}"
         ]
-        logging.info(f"Syncing {src_path} -> {dst_remote}...")
+        logging.info(f"Syncing local {src_path} -> {dst_remote}...")
         res = subprocess.run(cmd)
         if res.returncode != 0:
-            logging.error(f"Phase 1 failed for {folder}")
-            phase1_success = False
-            phase1_details.append(f"❌ <code>{folder}</code> 同步失敗 (Code {res.returncode})")
+            logging.error(f"Sync to {dst_remote} failed with code {res.returncode}")
+            all_success = False
+            failed_folders.append(folder)
         else:
-            logging.info(f"Phase 1 finished for {folder}")
-            phase1_details.append(f"✅ <code>{folder}</code> 增量同步完成")
+            logging.info(f"Sync to {dst_remote} finished for {folder}")
 
-    if not phase1_success:
-        msg = "❌ <b>【fnOS 備份告警 - 階段一同步失敗】</b>\n" + "\n".join(phase1_details) + "\n請查看日誌排除問題。"
-        send_telegram(msg)
+    if all_success:
+        return True, "✅ 增量同步完成"
+    else:
+        return False, f"❌ 同步警示 ({','.join(failed_folders)} 異常)"
+
+# ================= Sync Logic =================
+def execute_backup():
+    """執行全流程備份：Docker GFS 多雲分發 + 本地三雲直傳 (OD1 ➜ OD2 ➜ GD1)"""
+    logging.info("Starting Direct Multi-Cloud Backup Workflow...")
+    start_time = time.time()
+
+    # 1. Health Guard Pre-check
+    can_proceed, status = run_health_guard()
+    if not can_proceed:
+        logging.warning(f"Health guard blocked backup with status: {status}")
         return
 
-    # 4. Phase 2 & 3: Parallel Dual-Cloud Fan-Out (OD2, GD1)
-    fanout_results = execute_parallel_cloud_fanout()
-    phase2_success = fanout_results["phase2_success"]
-    phase3_msg = fanout_results["phase3_msg"]
-    
+    # 2. Phase 0: Docker GFS Snapshot (直接分發給所有雲)
+    logging.info("=== Phase 0: Starting Docker GFS Snapshot ===")
+    docker_success, docker_msg = execute_docker_gfs_backup()
+
+    targets = get_backup_targets()
+    logging.info(f"Discovered backup target folders: {targets}")
+
+    # 3. 節點一：本地 NAS ➜ od1_crypt (微軟 OD1 主儲存)
+    logging.info("=== Node 1: Syncing Local -> OD1 (Microsoft Primary) ===")
+    ok1, msg1 = sync_local_to_cloud("od1_crypt", "OD1 微軟主儲存", targets, "sync_od1")
+
+    # 4. 節點二：本地 NAS ➜ od2_crypt (微軟 OD2 鏡像副本)
+    logging.info("=== Node 2: Syncing Local -> OD2 (Microsoft Mirror) ===")
+    ok2, msg2 = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
+
+    # 5. 節點三：本地 NAS ➜ gd1_crypt (Google Drive 5TB 鏡像副本)
+    has_gdrive = "gd1_union" in get_all_union_clusters()
+    if has_gdrive:
+        logging.info("=== Node 3: Syncing Local -> GD1 (Google Drive Mirror) ===")
+        ok3, msg3 = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
+    else:
+        ok3, msg3 = True, "未配置略過"
+
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    report_msg = generate_daily_executive_report(duration_str, phase1_success, phase2_success, targets, docker_msg, phase3_msg)
+    report_msg = generate_daily_executive_report(duration_str, ok1, ok2, targets, docker_msg, msg3)
     send_telegram(report_msg)
 
-def execute_fanout_only():
-    """專用立即觸發：跳過本地掃描，直接執行雙雲端並行扇出鏡像並發送 Telegram 戰報"""
-    logging.info("Starting Parallel Fan-Out Cloud Mirror (Standalone)...")
+def execute_mirrors_only():
+    """專用立即觸發：本地直接同步鏡像雲端 (OD2 + GD1)"""
+    logging.info("Starting Direct Local -> Mirrors (OD2 + GD1)...")
     start_time = time.time()
 
     can_proceed, status = run_health_guard()
@@ -765,25 +686,33 @@ def execute_fanout_only():
         return
 
     targets = get_backup_targets()
-    fanout_results = execute_parallel_cloud_fanout()
+    logging.info(f"Discovered backup target folders: {targets}")
+
+    ok2, msg2 = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
     
+    has_gdrive = "gd1_union" in get_all_union_clusters()
+    if has_gdrive:
+        ok3, msg3 = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
+    else:
+        ok3, msg3 = True, "未配置略過"
+
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
     report_msg = generate_daily_executive_report(
         duration_str,
         True,
-        fanout_results["phase2_success"],
+        ok2,
         targets,
         "✅ 已就緒 (前次已封存)",
-        fanout_results["phase3_msg"]
+        msg3
     )
     send_telegram(report_msg)
 
 # ================= Daemon Loop =================
 def run_daemon():
     logging.info(f"fnOS Backup Daemon started. Daily scheduled sync time: {SYNC_SCHEDULE_TIME}")
-    send_telegram(f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行雙雲端極速鏡像同步。")
+    send_telegram(f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行本地直推多雲備份。")
 
     last_sync_date = ""
     last_health_check_hour = -1
@@ -807,15 +736,19 @@ def run_daemon():
         time.sleep(30)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="fnOS 4-3-2 Dual-Cloud Backup Manager")
+    parser = argparse.ArgumentParser(description="fnOS 4-3-2 Dual-Cloud Direct Backup Manager")
     parser.add_argument("--check-only", action="store_true", help="Only run health & capacity check")
     parser.add_argument("--docker-backup-now", action="store_true", help="Run Docker GFS snapshot and upload now")
-    parser.add_argument("--gdrive-sync-now", action="store_true", help="Run Phase 3 (Google Drive 5TB Mirror) immediately")
-    parser.add_argument("--fanout-now", action="store_true", help="Run Phase 2 & 3 parallel fan-out mirror immediately")
+    parser.add_argument("--sync-od1-now", action="store_true", help="Sync local NAS -> OD1 only")
+    parser.add_argument("--sync-od2-now", action="store_true", help="Sync local NAS -> OD2 only")
+    parser.add_argument("--sync-gd1-now", action="store_true", help="Sync local NAS -> GD1 only")
+    parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> OD2 and GD1 mirrors directly")
+    parser.add_argument("--sync-now", action="store_true", help="Run full backup to all clouds directly from NAS")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
-    parser.add_argument("--sync-now", action="store_true", help="Run full backup immediately")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
     args = parser.parse_args()
+
+    targets = get_backup_targets()
 
     if args.check_only:
         can, stat = run_health_guard()
@@ -823,19 +756,24 @@ if __name__ == "__main__":
     elif args.docker_backup_now:
         success, msg = execute_docker_gfs_backup()
         print(f"Docker Backup Result: {success} -> {msg}")
-    elif args.gdrive_sync_now:
-        success, msg = execute_gdrive_mirror()
-        print(f"Google Drive Mirror Result: {success} -> {msg}")
-    elif args.fanout_now:
-        execute_fanout_only()
+    elif args.sync_od1_now:
+        success, msg = sync_local_to_cloud("od1_crypt", "OD1 微軟主儲存", targets, "sync_od1")
+        print(f"OD1 Sync Result: {success} -> {msg}")
+    elif args.sync_od2_now:
+        success, msg = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
+        print(f"OD2 Sync Result: {success} -> {msg}")
+    elif args.sync_gd1_now:
+        success, msg = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
+        print(f"GD1 Sync Result: {success} -> {msg}")
+    elif args.sync_mirrors_now:
+        execute_mirrors_only()
+    elif args.sync_now:
+        execute_backup()
     elif args.test_report:
-        targets = get_backup_targets()
         report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", "✅ 成功 (已加密鏡像)")
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")
-    elif args.sync_now:
-        execute_backup()
     elif args.daemon:
         run_daemon()
     else:

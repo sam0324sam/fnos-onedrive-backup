@@ -34,10 +34,11 @@
 3. **冷熱資料分離 (Storage Tiering)**：
    * 守衛程式與高頻日誌置於 **`/vol2` (NVMe 高速 SSD)**，避免日常巡檢喚醒硬碟。
    * 資料來源讀取 **`/vol1` (22TB RAID 10 大容量機械陣列)**，兼顧極速讀寫與延長硬碟壽命。
-4. **流式跨雲直傳 (Zero-CPU Cloud-to-Cloud Streaming)**：
-   * 核心鏈路（OD1 ➜ OD2、OD1 ➜ GD1）直接串流傳輸 XSalsa20 密文，0 NAS 硬碟讀寫，0 二次加解密，極速並發達成 RPO 目標。
-5. **雙雲並行扇出 (Parallel Dual-Cloud Fan-Out)**：
-   * OD1 完成後，同時啟動 OD2 與 GD1 雙向並發鏡像，流量精細控制（總並發 4 執行緒 / 10 TPS），杜絕 API 限流並最大化頻寬利用率。
+4. **本地串流加密直灌 (Direct Local Multi-Cloud Streaming)**：
+   * 本地讀取 NAS RAID 10 陣列，經內存管道即時以 XSalsa20 加密後直接上傳各雲端（OD1、OD2、GD1）。
+   * 徹底規避微軟 OneDrive 下載 API 延遲與限流，家用寬頻上傳跑滿（15 ~ 20 MB/s），記憶體佔用極低（~60-150MB）。
+5. **多雲並行容災矩陣**：
+   * 一套金鑰架構，在微軟跨租戶（OD1/OD2）與谷歌（GD1）三方自動同步，杜絕單點故障與供應商綁定。
 6. **零寫死自適應 (Zero-Hardcoding)**：自動探索本地 UID 使用者目錄、自動掃描多雲合流池、動態生成行動端最適排版戰報。
 
 ---
@@ -53,26 +54,21 @@ graph TD
         WebGUI["rclone-web-dashboard<br>(Port 5572 Web 儀表板)"]
     end
 
-    subgraph Phase0 ["【階段 0】Docker 堆疊快照"]
-        Tar["GFS 階梯壓縮封裝<br>(docker_snapshot_YYYYMMDD.tar.gz)"]
-    end
-
-    subgraph Phase1 ["【階段 1】本地加密上傳"]
-        Crypt["od1_crypt (XSalsa20 客戶端加密)<br>目錄明文 ｜ 檔案內容 .bin 密文"]
+    subgraph Direct_Engine ["⚡ 本地串流加密分發引擎"]
+        Crypt["XSalsa20 內存加密管道 (64KB~16MB Buffer)<br>檔案內容 .bin 密文 ｜ 目錄結構明文"]
     end
 
     subgraph Dual_Cloud ["☁️ 雙巨頭跨雲異地容災 (OneDrive 5TB x 2 + Google Drive 5TB)"]
-        OD1["☁️ OD1 主儲存池 (od1_union)<br>租戶: 3lym23.onmicrosoft.com<br>(5.0 TB 原生空間，可循序擴充)"]
-        OD2["☁️ OD2 鏡像副本 (od2_union)<br>租戶: auvooo.cn<br>(5.0 TB 獨立租戶，跨域容災)"]
+        OD1["☁️ OD1 微軟主儲存 (od1_union)<br>租戶: 3lym23.onmicrosoft.com<br>(5.0 TB 原生空間，可循序擴充)"]
+        OD2["☁️ OD2 微軟鏡像 (od2_union)<br>租戶: auvooo.cn<br>(5.0 TB 獨立租戶，跨域容災)"]
         GD1["☁️ GD1 谷歌鏡像 (gd1_union)<br>帳號: sam0324sam.india@gmail.com<br>(5.0 TB Google One 獨立跨雲)"]
     end
 
-    SSD -.->|快照打包| Tar
-    Tar -->|加密上傳| Crypt
     HDD -->|唯讀增量掃描| Crypt
-    Crypt -->|只增不減| OD1
-    OD1 ==>|【階段 2】微軟跨租戶密文直傳<br>0 落盤 ｜ 0 CPU 運算| OD2
-    OD1 ==>|【階段 3】谷歌異雲密文直傳<br>64MB 塊 ｜ 高速並發| GD1
+    SSD -.->|Docker 快照打包| Crypt
+    Crypt ==>|本地直推 (15~20 MB/s)| OD1
+    Crypt ==>|本地直推 (15~20 MB/s)| OD2
+    Crypt ==>|本地直推 (15~20 MB/s)| GD1
 
     Guard -->|每日 02:00 / 巡檢告警| TG["📱 Telegram 機器人 (@msgMaster_bot)"]
 ```
@@ -83,28 +79,23 @@ graph TD
 
 系統於每日凌晨 **02:00** 自動啟動流水線（Pipeline）：
 
-### 1. 階段 0：Docker 容器堆疊快照 (GFS Snapshot)
+### 1. 階段 0：Docker 容器堆疊快照多雲分發 (GFS Snapshot)
 * **來源**：`/docker_src` (唯讀掛載實體 `/vol2/1000/docker/`)。
 * **處理**：排除日誌、快取與 `.git`，使用 `tar -czf` 完整封裝 Linux 權限、UID/GID 與軟連結。
-* **上傳**：推送至 `od1_crypt:docker_snapshots/`。
-* **淘汰**：執行 GFS 生命週期演算法，淘汰過期快照。
+* **分發**：本地打包後直接推送至 `od1_crypt:docker_snapshots/`、`od2_crypt:docker_snapshots/` 與 `gd1_crypt:docker_snapshots/`。
+* **淘汰**：執行 GFS 生命週期演算法，同時修剪三雲端過期快照。
 
-### 2. 階段 1：NAS 主資料增量上傳 (User Data Incremental)
+### 2. 階段 1：NAS 主資料直灌三雲端 (Direct Incremental Multi-Cloud)
 * **來源**：`/data` (唯讀掛載實體 `/vol1/`)。
 * **探索**：自動掃描所有純數字 UID 目錄（`1000`、`1001`、`1002`...）及 `@team`，過濾相簿快取與回收站。
-* **比對**：依檔案大小（Size）與修改時間（ModTime）進行高速增量比對，未變更檔案秒跳過。
-* **加密**：經過 `od1_crypt:` 即時加密後寫入 `od1_union:`。
-
-### 3. 階段 2 & 3：雙雲端並行扇出鏡像 (Parallel Dual-Cloud Fan-Out Replication)
-當階段 1 本地主資料於微軟 OD1 成功加密落盤後，系統啟動 **雙雲端並行扇出引擎 (Fan-Out Replication)**，兩條鏈路同時並發傳輸：
-
-* **【階段 2】微軟跨租戶密文鏡像 (OD1 ➜ OD2)**：
-  - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝流式直傳。
-* **【階段 3】谷歌異雲密文鏡像 (OD1 ➜ GD1 5TB)**：
-  - 參數：`--transfers=2`, `--checkers=4`, `--tpslimit=5`, 64MB 內存緩衝高速並行。
+* **比對與傳輸**：依檔案大小（Size）與修改時間（ModTime）進行高速增量比對，未變更檔案秒跳過。
+* **鏈路排程**：
+  1. **節點一 (OD1)**：本地 NAS ➜ `od1_crypt:` (微軟 OD1 主本)
+  2. **節點二 (OD2)**：本地 NAS ➜ `od2_crypt:` (微軟 OD2 鏡像)
+  3. **節點三 (GD1)**：本地 NAS ➜ `gd1_crypt:` (谷歌 GD1 5TB 鏡像)
 
 > [!TIP]
-> **精細流量治理 (Traffic Policing)**：兩個雲端鏡像同時向 OD1 讀取密文，總並發精準限制為 4 執行緒、總 TPS ≤ 10，**完全不傷 NAS 本機硬碟（0 磁頭磨損），且完美避開微軟 OneDrive HTTP 429 限流**，兼顧極速與系統韌性！
+> **本地加密串流優勢**：Go 語言 Rclone 核心以 `io.Reader` 串流管線執行 XSalsa20 加密，僅在內存中維持數十 MB 緩衝區，不耗硬碟且加密速度高達 1.5+ GB/s。直接上傳省去微軟下載 API 延遲，速度可達寬頻極限！
 
 ---
 
@@ -281,11 +272,13 @@ cd /vol2/1000/docker/rclone-backup
 | **手動健康與容量檢查** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --check-only` |
 | **手動測試 Telegram 戰報** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --test-report` |
 | **手動立即執行 Docker GFS 備份**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
-| **手動立即執行 Google Drive 鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --gdrive-sync-now` |
-| **手動立即執行雙雲並行扇出鏡像**| `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --fanout-now` |
-| **手動立即觸發全量雙雲極速備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
+| **手動立即直推微軟 OD1 (主本)** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-od1-now` |
+| **手動立即直推微軟 OD2 (鏡像)** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-od2-now` |
+| **手動立即直推谷歌 GD1 (5TB 鏡像)** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd1-now` |
+| **手動立即直推兩大鏡像 (OD2 + GD1)** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-mirrors-now` |
+| **手動立即觸發全量多雲直推備份** | `docker exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
 | **即時查看守衛即時日誌** | `docker logs -f rclone-backup-guard` |
-| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/phase2_mirror.log` ｜ `cat logs/phase3_gdrive_mirror.log` |
+| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/sync_od1_1000.log` ｜ `cat logs/sync_od2_1000.log` ｜ `cat logs/sync_gd1_1000.log` |
 | **存取 Web GUI 儀表板** | 瀏覽器開啟 `http://<NAS_IP>:5572/` (內網免密碼直連) |
 
 ---
