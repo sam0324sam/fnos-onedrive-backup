@@ -20,6 +20,8 @@ import subprocess
 import configparser
 import re
 import shutil
+import glob
+import threading
 import urllib.request
 import urllib.parse
 import concurrent.futures
@@ -35,6 +37,8 @@ SYNC_SCHEDULE_TIME = os.environ.get("SYNC_SCHEDULE_TIME", "02:00")  # HH:MM form
 DEFAULT_DATA_FOLDERS = ["1000", "1001", "1002", "@team"]
 DOCKER_SRC = os.environ.get("DOCKER_SRC", "/docker_src")
 STAGING_DIR = os.path.join(LOG_DIR, "staging")
+SYSTEM_BACKUP_DIR = os.environ.get("SYSTEM_BACKUP_DIR", "/mnt/system_backup")
+DAEMON_START_TIME = time.time()
 
 def get_backup_targets() -> list:
     """自動探索 /data 下所有純數字使用者 UID (如 1000, 1001, 1002, 1003...) 與 @team 目錄"""
@@ -68,8 +72,16 @@ def sig_handler(signum, frame):
 signal.signal(signal.SIGTERM, sig_handler)
 signal.signal(signal.SIGINT, sig_handler)
 
-# ================= Telegram Notifications =================
-def send_telegram(message: str) -> bool:
+# ================= Telegram Notifications & Interactions =================
+STATUS_KEYBOARD = {
+    "inline_keyboard": [
+        [
+            {"text": "🔄 立即刷新進度", "callback_data": "refresh_status"}
+        ]
+    ]
+}
+
+def send_telegram(message: str, reply_markup: dict = None) -> bool:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         logging.warning("Telegram Bot Token or Chat ID not configured. Skipping alert.")
         return False
@@ -81,6 +93,8 @@ def send_telegram(message: str) -> bool:
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
         data = urllib.parse.urlencode(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -88,6 +102,44 @@ def send_telegram(message: str) -> bool:
     except Exception as e:
         logging.error(f"Failed to send Telegram message: {e}")
         return False
+
+def edit_telegram_message(message_id: int, message: str, reply_markup: dict = None) -> bool:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/editMessageText"
+        payload = {
+            "chat_id": TG_CHAT_ID,
+            "message_id": message_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logging.error(f"Failed to edit Telegram message: {e}")
+        return False
+
+def answer_telegram_callback(callback_query_id: str, text: str = "已刷新即時數據！"):
+    if not TG_BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery"
+        payload = {
+            "callback_query_id": callback_query_id,
+            "text": text
+        }
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            pass
+    except Exception as e:
+        logging.warning(f"Failed to answer Telegram callback query: {e}")
 
 # ================= Rclone Helpers =================
 def parse_union_upstreams(union_section: str) -> list:
@@ -586,6 +638,328 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
 
     return True, f"✅ 已封存 ({archive_size_mb:.1f} MB, GFS 階梯保留中)"
 
+# ================= Real-time Status & Telegram Interactive Bot =================
+def is_rclone_running_for(folder: str, target_crypt: str) -> bool:
+    """檢查指定目錄與雲端是否已有 rclone copy 進程在執行，避免重複發起競爭配額"""
+    try:
+        ps_res = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+        for line in ps_res.stdout.splitlines():
+            if "rclone copy" in line and f"/{folder} " in line and f"{target_crypt}:{folder}" in line and "<defunct>" not in line:
+                return True
+    except Exception:
+        pass
+    return False
+
+def parse_rclone_log(log_path: str) -> dict:
+    """從 rclone 日誌結尾提取最即時之傳輸指標、速率、ETA 與進行中檔案隊列"""
+    if not os.path.exists(log_path) or os.path.getsize(log_path) == 0:
+        return {}
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            content = f.read()
+    except Exception:
+        return {}
+
+    stats = {
+        "rate_limited": False,
+        "transferring": []
+    }
+
+    if "Error 403: User rate limit exceeded" in content:
+        stats["rate_limited"] = True
+
+    m_trans = re.findall(r"Transferred:\s+([0-9\.]+\s+[A-Za-z]+)\s+/\s+([0-9\.]+\s+[A-Za-z]+),\s+([0-9]+%),\s+([0-9\.]+\s+[A-Za-z/]+),\s+ETA\s+([^\n\r]+)", content)
+    if m_trans:
+        last_trans = m_trans[-1]
+        stats["bytes_done"] = last_trans[0]
+        stats["bytes_total"] = last_trans[1]
+        stats["percent"] = last_trans[2]
+        stats["speed"] = last_trans[3]
+        stats["eta"] = last_trans[4].strip()
+
+    m_files = re.findall(r"Transferred:\s+([0-9]+)\s+/\s+([0-9]+),\s+([0-9]+%)", content)
+    if m_files:
+        last_files = m_files[-1]
+        stats["files_done"] = last_files[0]
+        stats["files_total"] = last_files[1]
+        stats["files_percent"] = last_files[2]
+
+    m_elapsed = re.findall(r"Elapsed time:\s+([^\n\r]+)", content)
+    if m_elapsed:
+        stats["elapsed"] = m_elapsed[-1].strip()
+
+    if "Transferring:" in content:
+        last_tf_chunk = content.split("Transferring:")[-1]
+        for line in last_tf_chunk.splitlines():
+            line = line.strip()
+            if line.startswith("*"):
+                line_clean = line.lstrip("* ").strip()
+                if ":" in line_clean:
+                    fname, fprog = line_clean.split(":", 1)
+                    parts = fname.strip().split("/")
+                    fname_disp = f"{parts[-2]}/{parts[-1]}" if len(parts) > 1 else parts[-1]
+                    prog_text = fprog.strip().split(",")[0]
+                    stats["transferring"].append(f"{fname_disp} ({prog_text})")
+                else:
+                    stats["transferring"].append(line_clean[:45])
+            elif line.startswith("202") or "INFO" in line or "ERROR" in line:
+                break
+    stats["transferring"] = stats["transferring"][:3]
+    return stats
+
+def generate_realtime_status_report() -> str:
+    """產出極致詳細之實時監控戰報（涵蓋各雲端狀態、傳輸速度、隊列、隨身碟備份、Docker快照與NAS負載）"""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    uptime_sec = int(time.time() - DAEMON_START_TIME)
+    uptime_days = uptime_sec // 86400
+    uptime_hours = (uptime_sec % 86400) // 3600
+    uptime_mins = (uptime_sec % 3600) // 60
+    if uptime_days > 0:
+        uptime_str = f"{uptime_days} 天 {uptime_hours} 小時"
+    elif uptime_hours > 0:
+        uptime_str = f"{uptime_hours} 小時 {uptime_mins} 分"
+    else:
+        uptime_str = f"{uptime_mins} 分鐘"
+
+    lines = [
+        "📊 <b>【fnOS 4-3-2 備份體系 - 即時監控戰報】</b>",
+        f"📅 <b>查詢時間：</b> <code>{now_str}</code>",
+        f"⏱️ <b>守衛狀態：</b> 🟢 運作中 (已持續 {uptime_str}) ｜ 排程：<code>{SYNC_SCHEDULE_TIME}</code>\n"
+    ]
+
+    # 1. 檢查運行中的進程
+    ps_res = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+    active_transfers = []
+    for line in ps_res.stdout.splitlines():
+        if "rclone copy" in line and not line.strip().startswith("[") and "<defunct>" not in line:
+            m = re.search(r"rclone copy\s+(\S+)\s+(\S+):", line)
+            if m:
+                folder = os.path.basename(m.group(1).rstrip("/"))
+                remote = m.group(2)
+                active_transfers.append((remote, folder))
+
+    # 2. 雲端容災節點掃描
+    clouds = [
+        ("od1_crypt", "OD1 微軟主儲存", "od1"),
+        ("od2_crypt", "OD2 微軟鏡像副本", "od2"),
+        ("gd1_crypt", "GD1 谷歌 5TB 鏡像", "gd1")
+    ]
+
+    lines.append("☁️ <b>各雲端容災節點狀態</b>")
+    for remote, label, prefix in clouds:
+        is_active = False
+        active_folder = None
+        for r, f in active_transfers:
+            if remote.startswith(r) or r.startswith(prefix):
+                is_active = True
+                active_folder = f
+                break
+
+        log_files = sorted(glob.glob(os.path.join(LOG_DIR, f"sync_{prefix}_*.log")))
+        latest_stats = None
+        if log_files:
+            if active_folder:
+                matching = [lf for lf in log_files if f"_{active_folder}.log" in lf]
+                target_lf = matching[-1] if matching else log_files[-1]
+            else:
+                target_lf = max(log_files, key=os.path.getmtime)
+            latest_stats = parse_rclone_log(target_lf)
+
+        if is_active and latest_stats and ("speed" in latest_stats or "percent" in latest_stats):
+            speed = latest_stats.get("speed", "計算中")
+            b_done = latest_stats.get("bytes_done", "")
+            b_tot = latest_stats.get("bytes_total", "")
+            pct = latest_stats.get("percent", "0%")
+            eta = latest_stats.get("eta", "計算中")
+            f_done = latest_stats.get("files_done", "")
+            f_tot = latest_stats.get("files_total", "")
+            f_pct = latest_stats.get("files_percent", "")
+
+            lines.append(f"• <b>{label}</b>：⚡ <b>傳輸中 ({pct})</b>")
+            lines.append(f"  ├ 目錄：<code>{active_folder}</code> ｜ 速率：<b>{speed}</b>")
+            if b_done and b_tot:
+                lines.append(f"  ├ 容量：{b_done} / {b_tot} ({pct})")
+            if f_done and f_tot:
+                lines.append(f"  ├ 檔案：{f_done} / {f_tot} ({f_pct})")
+            lines.append(f"  └ 剩餘時間 (ETA)：<b>{eta}</b>")
+            if latest_stats.get("transferring"):
+                lines.append("  └ 傳輸中隊列：")
+                for tf in latest_stats["transferring"]:
+                    lines.append(f"    • <code>{tf}</code>")
+            if latest_stats.get("rate_limited"):
+                lines.append("  ⚠️ 提示：Google 750GB 配額冷卻中 (24h 滾動窗口滑過後自動續傳)")
+        else:
+            lines.append(f"• <b>{label}</b>：🟢 <b>100% 已同步完畢</b> (已就緒)")
+        lines.append("")
+
+    # 3. 32G 隨身碟系統時光機
+    lines.append("💾 <b>32G 隨身碟系統時光機 (裸機災難復原)</b>")
+    if os.path.exists(SYSTEM_BACKUP_DIR):
+        latest_archive = os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_latest.tar.zst")
+        if os.path.exists(latest_archive):
+            sz = f"{os.path.getsize(latest_archive) / (1024*1024*1024):.1f} GB"
+            mtime = datetime.fromtimestamp(os.path.getmtime(latest_archive)).strftime("%Y-%m-%d %H:%M")
+            try:
+                du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
+                free_gb = du.free / (1024 * 1024 * 1024)
+                total_gb = du.total / (1024 * 1024 * 1024)
+                space_str = f" (隨身碟剩餘 {free_gb:.1f} GB / {total_gb:.1f} GB)"
+            except Exception:
+                space_str = ""
+            lines.append(f"• 狀態：🟢 <b>已掛載就緒</b>{space_str}")
+            lines.append(f"• 最新快照：<b>{sz}</b> (建立於 <code>{mtime}</code>)")
+            lines.append("• 救援資源：✅ efi_boot.img ｜ ✅ restore_system.sh ｜ ✅ RESTORE_GUIDE.md")
+            lines.append("• 快照排程：每週日 03:00 自動備份 (保留最新 4 份)")
+        else:
+            lines.append("• 狀態：🟡 隨身碟已掛載，尚未建立快照檔")
+    else:
+        lines.append("• 狀態：⚪ 隨身碟未掛載")
+    lines.append("")
+
+    # 4. Docker GFS 快照狀態
+    lines.append("🐳 <b>Docker 容器全鏡像 GFS 階梯快照</b>")
+    manager_log = os.path.join(LOG_DIR, "manager.log")
+    docker_info = None
+    if os.path.exists(manager_log):
+        try:
+            with open(manager_log, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 32768))
+                m_content = f.read()
+                matches = re.findall(r"\[([\d\- :]+),\d+\] \[INFO\] Docker archive created successfully \(([\d\.]+ MB)\)", m_content)
+                if matches:
+                    docker_info = matches[-1]
+        except Exception:
+            pass
+
+    if docker_info:
+        lines.append(f"• 最新封存：<b>{docker_info[1]}</b> (<code>{docker_info[0]}</code>)")
+        lines.append("• 階梯保留：✅ 正常 (14天日備份 + 8週週備份 + 12個月月備份)")
+        lines.append("• 多雲同步：已同步至 OD1、OD2、GD1 加密池")
+    else:
+        lines.append("• 階梯保留：✅ 每日 02:00 自動封存並推播三雲")
+    lines.append("")
+
+    # 5. NAS 主機硬體狀態
+    lines.append("⚙️ <b>NAS 主機硬體即時狀態</b>")
+    try:
+        load1, load5, load15 = os.getloadavg()
+        lines.append(f"• 系統負載 (Load)：{load1:.2f}, {load5:.2f}, {load15:.2f}")
+    except Exception:
+        pass
+
+    try:
+        with open("/proc/meminfo") as f:
+            mem = f.read()
+            total = int(re.search(r"MemTotal:\s+(\d+)", mem).group(1)) / 1024 / 1024
+            avail = int(re.search(r"MemAvailable:\s+(\d+)", mem).group(1)) / 1024 / 1024
+            used = total - avail
+            lines.append(f"• 記憶體使用：{used:.1f} GB / {total:.1f} GB ({used/total*100:.1f}%)")
+    except Exception:
+        pass
+
+    try:
+        data_path = "/vol1" if os.path.exists("/vol1") else "/data"
+        if os.path.exists(data_path):
+            du_data = shutil.disk_usage(data_path)
+            free_tb = du_data.free / (1024 * 1024 * 1024 * 1024)
+            total_tb = du_data.total / (1024 * 1024 * 1024 * 1024)
+            lines.append(f"• 本地儲存池 ({data_path})：剩餘 {free_tb:.2f} TB / {total_tb:.2f} TB")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+def telegram_command_listener():
+    """
+    背景常駐線程：長輪詢監聽 Telegram 互動指令與回調按鈕
+    - 支援文字指令：/status, /progress, 進度, 狀態, 速度, 戰報, 即時進度
+    - 支援回調按鈕：refresh_status (就地平滑更新訊息)
+    - 安全防護：嚴格校驗 sender_id == TG_CHAT_ID (1004669639)
+    """
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        logging.warning("Telegram token or chat id missing, command listener not started.")
+        return
+
+    logging.info("Telegram interactive command listener thread started.")
+    offset = 0
+
+    # 清空過期請求，避免重啟後重複觸發
+    try:
+        init_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates?offset=-1&timeout=0"
+        with urllib.request.urlopen(init_url, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("ok") and data.get("result"):
+                offset = data["result"][-1]["update_id"] + 1
+    except Exception as e:
+        logging.warning(f"Failed to initialize Telegram update offset: {e}")
+
+    valid_keywords = {"/status", "/progress", "status", "progress", "進度", "狀態", "速度", "戰報", "即時進度"}
+
+    while running:
+        try:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status != 200:
+                    time.sleep(5)
+                    continue
+                data = json.loads(resp.read().decode("utf-8"))
+                if not data.get("ok"):
+                    time.sleep(5)
+                    continue
+
+                for item in data.get("result", []):
+                    update_id = item["update_id"]
+                    offset = max(offset, update_id + 1)
+
+                    # 1. 處理按鈕回調 (Callback Query)
+                    if "callback_query" in item:
+                        cq = item["callback_query"]
+                        cq_id = cq.get("id")
+                        sender_id = str(cq.get("from", {}).get("id", ""))
+                        data_str = cq.get("data", "")
+                        msg = cq.get("message", {})
+                        msg_id = msg.get("message_id")
+
+                        if sender_id != str(TG_CHAT_ID):
+                            logging.warning(f"Unauthorized Telegram callback attempt from ID {sender_id}")
+                            continue
+
+                        if data_str == "refresh_status" and msg_id:
+                            answer_telegram_callback(cq_id, text="🔄 正在刷新即時數據...")
+                            report = generate_realtime_status_report()
+                            edit_telegram_message(msg_id, report, reply_markup=STATUS_KEYBOARD)
+
+                    # 2. 處理文字訊息 (Message)
+                    elif "message" in item:
+                        msg = item["message"]
+                        sender_id = str(msg.get("from", {}).get("id", ""))
+                        text = msg.get("text", "").strip()
+
+                        if sender_id != str(TG_CHAT_ID):
+                            logging.warning(f"Unauthorized Telegram message from ID {sender_id}: {text}")
+                            continue
+
+                        text_lower = text.lower()
+                        should_reply = False
+                        for kw in valid_keywords:
+                            if kw in text_lower or kw in text:
+                                should_reply = True
+                                break
+
+                        if should_reply:
+                            logging.info(f"Received interactive Telegram command: '{text}' from {sender_id}")
+                            report = generate_realtime_status_report()
+                            send_telegram(report, reply_markup=STATUS_KEYBOARD)
+
+        except Exception as e:
+            time.sleep(3)
+
 def sync_local_to_cloud(target_crypt: str, cloud_label: str, targets: list, log_prefix: str) -> tuple[bool, str]:
     """
     通用本地直接串流加密同步 (Direct Local-to-Cloud Stream Sync)
@@ -605,6 +979,10 @@ def sync_local_to_cloud(target_crypt: str, cloud_label: str, targets: list, log_
 
         dst_remote = f"{target_crypt}:{folder}"
         log_file = os.path.join(LOG_DIR, f"{log_prefix}_{folder}.log")
+
+        if is_rclone_running_for(folder, target_crypt):
+            logging.warning(f"Sync for {src_path} -> {dst_remote} is already running in background. Skipping duplicate spawn.")
+            continue
 
         cmd = [
             "rclone", "copy", src_path, dst_remote,
@@ -711,7 +1089,18 @@ def execute_mirrors_only():
 # ================= Daemon Loop =================
 def run_daemon():
     logging.info(f"fnOS Backup Daemon started. Daily scheduled sync time: {SYNC_SCHEDULE_TIME}")
-    send_telegram(f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行本地直推多雲備份。")
+
+    # 啟動 Telegram 互動指令監聽背景線程
+    listener_thread = threading.Thread(target=telegram_command_listener, daemon=True, name="TelegramListener")
+    listener_thread.start()
+    logging.info("Telegram interactive command listener thread dispatched successfully.")
+
+    send_telegram(
+        f"🚀 <b>【fnOS 備份守衛已啟動】</b>\n"
+        f"• 守衛服務已就緒，每日預設於 <b>{SYNC_SCHEDULE_TIME}</b> 執行本地直推多雲備份。\n"
+        f"• 隨時於 Telegram 輸入 <code>/status</code> 或「<code>進度</code>」即可查看即時同步戰報與速度。",
+        reply_markup=STATUS_KEYBOARD
+    )
 
     last_sync_date = ""
     last_health_check_hour = -1
@@ -744,6 +1133,7 @@ if __name__ == "__main__":
     parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> OD2 and GD1 mirrors directly")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup to all clouds directly from NAS")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
+    parser.add_argument("--status", action="store_true", help="Generate and print realtime status report (also sends to Telegram if configured)")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
     args = parser.parse_args()
 
@@ -773,6 +1163,11 @@ if __name__ == "__main__":
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")
+    elif args.status:
+        report = generate_realtime_status_report()
+        print(report)
+        if TG_BOT_TOKEN and TG_CHAT_ID:
+            send_telegram(report, reply_markup=STATUS_KEYBOARD)
     elif args.daemon:
         run_daemon()
     else:

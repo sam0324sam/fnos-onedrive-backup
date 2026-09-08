@@ -30,6 +30,7 @@ services:
       - /vol1:/data:ro
       - /vol2/1000/docker:/docker_src:ro
       - /vol2/1000/docker/rclone-backup/logs:/logs
+      - /mnt/system_backup:/mnt/system_backup:ro
     environment:
       - TZ=Asia/Taipei
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
