@@ -331,26 +331,29 @@ def get_cluster_stats(cluster_name: str) -> dict:
     }
 
 def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list, docker_msg: str = "", phase3_msg: str = "", phase4_msg: str = "") -> str:
-    """產出適合 Telegram 閱讀、高度自適應擴充的 4-3-2 / 3-2-1 全維度每日維運日報"""
+    """產出適合手機 Telegram 閱讀、徹底杜絕斷字折行的 4-3-2 現代極簡卡片風每日維運日報"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_stat = get_local_storage_stats("/data")
     clusters = get_all_union_clusters()
     has_gdrive = "gd1_union" in clusters
 
-    # 1. 本地儲存池狀態 (完全動態讀取)
+    # 1. 標題與基本規格
+    title_prefix = "【fnOS 備份體系每日維運日報】"
+    spec_label = "4-3-2 雙雲端容災" if has_gdrive else "3-2-1 雙微軟租戶"
+
+    # 2. 本地儲存池
     targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
     if local_stat:
         local_sec = (
-            f"🖥️ <b>本地資料池 (/vol1)</b>\n"
-            f"• 陣列容量：<b>{local_stat['total_tb']:.1f} TB</b> ｜ 剩餘可用：<b>{local_stat['free_tb']:.1f} TB</b>\n"
-            f"• 目前水位：<b>{local_stat['used_gb']:.1f} GB</b> ({local_stat['use_percent']:.1f}%)\n"
-            f"• 自動納管：{targets_str}"
+            f"🖥️ <b>本地陣列 (/vol1)</b>\n"
+            f"• 儲存水位：<b>{local_stat['used_gb']:.1f} GB</b> / {local_stat['total_tb']:.1f} TB (剩 {local_stat['free_tb']:.1f} TB)\n"
+            f"• 納管目錄：{targets_str}"
         )
     else:
-        local_sec = f"🖥️ <b>本地資料池</b>\n• 自動納管：{targets_str}"
+        local_sec = f"🖥️ <b>本地陣列</b>\n• 納管目錄：{targets_str}"
 
-    # 2. 雲端集群狀態 (動態迴圈支援任意多個 union 集群與帳號擴充)
-    cloud_sections = []
+    # 3. 雲端儲存池現況 (緊湊單行化，告別冗長膨脹)
+    cloud_lines = ["☁️ <b>雲端儲存池現況 (已用 ｜ 剩餘可用)</b>"]
     all_clusters_ok = True
     for c_name in clusters:
         c_stat = get_cluster_stats(c_name)
@@ -358,73 +361,83 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
             all_clusters_ok = False
 
         if "od1" in c_name:
-            alias_title = "OD1 微軟主儲存池"
+            label = "OD1 微軟主本"
         elif "od2" in c_name:
-            alias_title = "OD2 微軟鏡像副本"
+            label = "OD2 微軟鏡像"
         elif "gd" in c_name:
-            alias_title = "GD1 谷歌鏡像副本"
+            label = "GD1 谷歌鏡像"
         else:
-            alias_title = f"雲端池 ({c_name})"
+            label = c_name
 
-        lines = [f"☁️ <b>{alias_title} ({c_name})</b>"]
-        lines.append(f"• 聚合總量：<b>{c_stat['total_tb']:.1f} TB</b> ｜ 剩餘可用：<b>{c_stat['free_tb']:.1f} TB</b>")
-        lines.append(f"• 目前水位：<b>{c_stat['used_gb']:.1f} GB</b> ({c_stat['use_percent']:.1f}%)")
-        lines.append("• 節點清單：")
+        icon = "🟢" if c_stat["all_ok"] else "🔴"
+        cloud_lines.append(f"• {label}：{c_stat['used_gb']:.1f} GB ｜ 剩 <b>{c_stat['free_tb']:.1f} TB</b> {icon}")
 
-        accs = c_stat.get("accounts", [])
-        for idx, a in enumerate(accs):
-            branch = "└" if idx == len(accs) - 1 else "├"
-            if a["status"] in ["🟢", "🟡"]:
-                lines.append(f"  {branch} <code>{a['remote']}</code> {a['status']} 剩餘 {a['free_tb']:.1f} TB")
-            else:
-                lines.append(f"  {branch} <code>{a['remote']}</code> 🔴 連線異常")
-        cloud_sections.append("\n".join(lines))
+    cloud_sec = "\n".join(cloud_lines)
 
-    cloud_sec = "\n\n".join(cloud_sections)
-
-    # 3. 本次備份傳輸指標
-    phase1_status = "✅ 成功" if phase1_success else "❌ 失敗"
-    phase2_status = "✅ 成功" if phase2_success else "❌ 失敗"
+    # 4. 本次備份傳輸結果 (單行簡潔，杜絕斷字折行)
+    phase1_status = "✅ 成功 (本地直傳)" if phase1_success else "❌ 異常"
+    phase2_status = "✅ 成功 (本地直傳)" if phase2_success else "❌ 異常"
     transfer_lines = [
-        "⚡ <b>本次備份傳輸總結</b>",
-        f"• 節點一 (本地 ➜ OD1 微軟主本)：{phase1_status}",
-        f"• 節點二 (本地 ➜ OD2 微軟鏡像)：{phase2_status}"
+        "⚡ <b>本次備份傳輸結果 (多雲並行直灌)</b>",
+        f"• OD1 微軟主本：{phase1_status}",
+        f"• OD2 微軟鏡像：{phase2_status}"
     ]
     if has_gdrive:
-        phase3_display = phase3_msg if phase3_msg else "✅ 成功"
-        transfer_lines.append(f"• 節點三 (本地 ➜ GD1 谷歌鏡像)：{phase3_display}")
+        phase3_display = phase3_msg if phase3_msg else "✅ 成功 (增量同步)"
+        transfer_lines.append(f"• GD1 谷歌鏡像：{phase3_display}")
     if docker_msg:
-        transfer_lines.append(f"• 容器快照 (Docker GFS)：{docker_msg}")
-    transfer_lines.append("• 傳輸架構：⚡ 多雲全並行直接直灌 (Concurrent Multi-Cloud Streaming)")
-    transfer_lines.append(f"• 執行總耗時：{duration_str}")
+        m_sz = re.search(r"(\d+\.?\d*\s+[KMGTP]B)", docker_msg)
+        if m_sz:
+            clean_docker = f"✅ {m_sz.group(1)} (GFS 階梯)"
+        else:
+            clean_docker = "✅ 已封存 (GFS 階梯)"
+        transfer_lines.append(f"• Docker 快照 ：{clean_docker}")
+    transfer_lines.append(f"• 總執行耗時  ：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
-    # 4. 容災鏈路檢核 (4-3-2 Dual-Cloud 或 3-2-1)
-    if has_gdrive:
-        is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
-        sla_badge = "🛡️ <b>完全合規 (4-3-2 Dual-Cloud Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
-        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ｜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'} ｜ [GD1 谷歌鏡像] {'🟢' if all_clusters_ok else '🔴'}"
-        title_prefix = "【fnOS 4-3-2 雙雲端異地每日維運日報】"
-    else:
-        is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
-        sla_badge = "🛡️ <b>完全合規 (3-2-1 Verified)</b>" if is_fully_compliant else "⚠️ <b>鏈路警示 (需檢視)</b>"
-        topology = f"[本地陣列] 🟢 ➜ [OD1 微軟主本] {'🟢' if phase1_success else '🔴'} ｜ [OD2 微軟鏡像] {'🟢' if phase2_success else '🔴'}"
-        title_prefix = "【fnOS 3-2-1 雙微軟租戶每日維運日報】"
+    # 5. 容災鏈路檢核 (垂直樹狀圖，杜絕橫向擠壓斷截)
+    is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
+    sla_status = "完全合規 🟢" if is_fully_compliant else "鏈路警示 ⚠️"
 
-    sla_sec = (
-        f"🛡️ <b>容災拓撲狀態</b>\n"
-        f"• 鏈路檢核：{sla_badge}\n"
-        f"• 拓撲節點：{topology}"
-    )
+    if has_gdrive:
+        tree_lines = [
+            f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
+            f"├ 本地實體陣列：🟢 正常 (RAID 10)",
+            f"├ OD1 微軟主本：{'🟢 正常 (M365 跨租戶)' if phase1_success else '🔴 異常'}",
+            f"├ OD2 微軟鏡像：{'🟢 正常 (M365 雙副本)' if phase2_success else '🔴 異常'}",
+            f"└ GD1 谷歌鏡像：{'🟢 正常 (Google 5TB 鏡像)' if all_clusters_ok else '🔴 異常'}"
+        ]
+    else:
+        tree_lines = [
+            f"🛡️ <b>3-2-1 容災鏈路檢核：{sla_status}</b>",
+            f"├ 本地實體陣列：🟢 正常 (RAID 10)",
+            f"├ OD1 微軟主本：{'🟢 正常 (M365 跨租戶)' if phase1_success else '🔴 異常'}",
+            f"└ OD2 微軟鏡像：{'🟢 正常 (M365 雙副本)' if phase2_success else '🔴 異常'}"
+        ]
+    sla_sec = "\n".join(tree_lines)
+
+    # 6. 32G 隨身碟時光機狀態 (納入日報完整閉環)
+    usb_sec = ""
+    if os.path.exists(SYSTEM_BACKUP_DIR):
+        latest_archive = os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_latest.tar.zst")
+        if os.path.exists(latest_archive):
+            sz = f"{os.path.getsize(latest_archive) / (1024*1024*1024):.1f} GB"
+            try:
+                du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
+                free_gb = du.free / (1024 * 1024 * 1024)
+                usb_sec = f"\n💾 <b>系統隨身碟時光機：</b>🟢 正常 ({sz} 快照, 剩 {free_gb:.1f} GB)\n"
+            except Exception:
+                usb_sec = f"\n💾 <b>系統隨身碟時光機：</b>🟢 正常 ({sz} 快照)\n"
 
     full_report = (
         f"📊 <b>{title_prefix}</b>\n"
-        f"📅 <b>報告時間：</b> {now_str}\n\n"
+        f"📅 <code>{now_str}</code> ｜ {spec_label}\n\n"
         f"{local_sec}\n\n"
         f"{cloud_sec}\n\n"
         f"{transfer_sec}\n\n"
-        f"{sla_sec}\n\n"
-        f"⏰ <b>下次例行備份：</b> 每日 {SYNC_SCHEDULE_TIME}"
+        f"{sla_sec}\n"
+        f"{usb_sec}"
+        f"⏰ <b>下次例行排程：</b>每日 {SYNC_SCHEDULE_TIME}"
     )
     return full_report
 
@@ -743,9 +756,9 @@ def generate_realtime_status_report() -> str:
 
     # 2. 雲端容災節點掃描
     clouds = [
-        ("od1_crypt", "OD1 微軟主儲存", "od1"),
-        ("od2_crypt", "OD2 微軟鏡像副本", "od2"),
-        ("gd1_crypt", "GD1 谷歌 5TB 鏡像", "gd1")
+        ("od1_crypt", "OD1 微軟主本", "od1"),
+        ("od2_crypt", "OD2 微軟鏡像", "od2"),
+        ("gd1_crypt", "GD1 谷歌鏡像", "gd1")
     ]
 
     lines.append("☁️ <b>各雲端容災節點狀態</b>")
@@ -796,7 +809,7 @@ def generate_realtime_status_report() -> str:
         lines.append("")
 
     # 3. 32G 隨身碟系統時光機
-    lines.append("💾 <b>32G 隨身碟系統時光機 (裸機災難復原)</b>")
+    lines.append("💾 <b>系統隨身碟時光機 (裸機災難復原)</b>")
     if os.path.exists(SYSTEM_BACKUP_DIR):
         latest_archive = os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_latest.tar.zst")
         if os.path.exists(latest_archive):
@@ -806,13 +819,13 @@ def generate_realtime_status_report() -> str:
                 du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
                 free_gb = du.free / (1024 * 1024 * 1024)
                 total_gb = du.total / (1024 * 1024 * 1024)
-                space_str = f" (隨身碟剩餘 {free_gb:.1f} GB / {total_gb:.1f} GB)"
+                space_str = f" (剩 {free_gb:.1f} GB / {total_gb:.1f} GB)"
             except Exception:
                 space_str = ""
             lines.append(f"• 狀態：🟢 <b>已掛載就緒</b>{space_str}")
-            lines.append(f"• 最新快照：<b>{sz}</b> (建立於 <code>{mtime}</code>)")
-            lines.append("• 救援資源：✅ efi_boot.img ｜ ✅ restore_system.sh ｜ ✅ RESTORE_GUIDE.md")
-            lines.append("• 快照排程：每週日 03:00 自動備份 (保留最新 4 份)")
+            lines.append(f"• 最新快照：<b>{sz}</b> (<code>{mtime}</code>)")
+            lines.append("• 救援資源：✅ efi_boot.img ｜ ✅ 一鍵還原腳本")
+            lines.append("• 排程週期：每週日 03:00 自動備份 (保留 4 份)")
         else:
             lines.append("• 狀態：🟡 隨身碟已掛載，尚未建立快照檔")
     else:
@@ -838,7 +851,7 @@ def generate_realtime_status_report() -> str:
 
     if docker_info:
         lines.append(f"• 最新封存：<b>{docker_info[1]}</b> (<code>{docker_info[0]}</code>)")
-        lines.append("• 階梯保留：✅ 正常 (14天日備份 + 8週週備份 + 12個月月備份)")
+        lines.append("• 階梯保留：✅ 正常 (14天日備 + 8週週備 + 12月月備)")
         lines.append("• 多雲同步：已同步至 OD1、OD2、GD1 加密池")
     else:
         lines.append("• 階梯保留：✅ 每日 02:00 自動封存並推播三雲")
