@@ -58,8 +58,16 @@ parted -s "$TARGET_DISK" mkpart "SYSTEM" ext4 95MiB 100%
 partprobe "$TARGET_DISK" 2>/dev/null || sleep 2
 
 echo "[2/5] 正在格式化並還原系統原始 UUID..."
+# 嘗試從隨身碟元數據 disk_uuids.txt 動態提取原始 UUID，若無則回退至預設值
 ORIGINAL_BOOT_UUID="69F9-D2E7"
 ORIGINAL_ROOT_UUID="fd95eab2-de97-4308-926a-852750bfcb60"
+
+if [ -f "${SCRIPT_DIR}/disk_uuids.txt" ]; then
+    DETECTED_BOOT_UUID=$(grep -i -E 'vfat|fat32' "${SCRIPT_DIR}/disk_uuids.txt" | grep -o 'UUID="[^"]*"' | head -n1 | cut -d'"' -f2 2>/dev/null || true)
+    DETECTED_ROOT_UUID=$(grep -i -E 'ext4|xfs' "${SCRIPT_DIR}/disk_uuids.txt" | grep -o 'UUID="[^"]*"' | head -n1 | cut -d'"' -f2 2>/dev/null || true)
+    [ -n "$DETECTED_BOOT_UUID" ] && ORIGINAL_BOOT_UUID="$DETECTED_BOOT_UUID"
+    [ -n "$DETECTED_ROOT_UUID" ] && ORIGINAL_ROOT_UUID="$DETECTED_ROOT_UUID"
+fi
 
 # 格式化 EFI
 mkfs.vfat -F 32 -i "${ORIGINAL_BOOT_UUID//-/}" "$PART_BOOT"

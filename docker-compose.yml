@@ -6,9 +6,9 @@ services:
     ports:
       - "5572:5572"
     volumes:
-      - /vol2/1000/docker/rclone-backup/config:/config/rclone
-      - /vol1:/data:ro
-      - /vol2/1000/docker/rclone-backup/logs:/logs
+      - ./config:/config/rclone
+      - ${NAS_DATA_DIR:-/vol1}:/data:ro,rslave
+      - ./logs:/logs
     environment:
       - TZ=Asia/Taipei
     command:
@@ -25,15 +25,17 @@ services:
     container_name: rclone-backup-guard
     restart: unless-stopped
     volumes:
-      - /vol2/1000/docker/rclone-backup/config:/config/rclone
-      - /vol2/1000/docker/rclone-backup/scripts:/app/scripts
-      - /vol1:/data:ro
-      - /vol2/1000/docker:/docker_src:ro
-      - /vol2/1000/docker/rclone-backup/logs:/logs
-      - /mnt/system_backup:/mnt/system_backup:ro
+      - ./config:/config/rclone
+      - ./scripts:/app/scripts
+      - ${NAS_DATA_DIR:-/vol1}:/data:ro,rslave
+      - ${DOCKER_SRC_DIR:-/vol2/1000/docker}:/docker_src:ro
+      - ./logs:/logs
+      - ${SYSTEM_BACKUP_DIR:-/mnt/system_backup}:/mnt/system_backup:ro
     environment:
       - TZ=Asia/Taipei
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - FREE_THRESHOLD_GB=${FREE_THRESHOLD_GB:-100.0}
       - SYNC_SCHEDULE_TIME=${SYNC_SCHEDULE_TIME:-02:00}
+      - BACKUP_FOLDERS=${BACKUP_FOLDERS:-}
+      - SYSTEM_BACKUP_DIR=/mnt/system_backup

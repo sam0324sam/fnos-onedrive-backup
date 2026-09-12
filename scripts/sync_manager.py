@@ -41,16 +41,26 @@ SYSTEM_BACKUP_DIR = os.environ.get("SYSTEM_BACKUP_DIR", "/mnt/system_backup")
 DAEMON_START_TIME = time.time()
 
 def get_backup_targets() -> list:
-    """自動探索 /data 下所有純數字使用者 UID (如 1000, 1001, 1002, 1003...) 與 @team 目錄"""
-    targets = []
+    """自訂或自動探索 /data 下之備份目錄 (支援環境變數 BACKUP_FOLDERS)"""
+    custom_folders = os.environ.get("BACKUP_FOLDERS", "").strip()
+    if custom_folders:
+        return [f.strip() for f in custom_folders.split(",") if f.strip()]
+
     data_dir = "/data"
     if os.path.exists(data_dir):
-        for item in sorted(os.listdir(data_dir)):
-            full_path = os.path.join(data_dir, item)
-            if os.path.isdir(full_path):
-                if item.isdigit() or item == "@team":
-                    targets.append(item)
-    return targets if targets else DEFAULT_DATA_FOLDERS
+        # 1. 優先探索常見 UID 或 @team (相容 fnOS)
+        fnos_targets = [item for item in sorted(os.listdir(data_dir))
+                        if os.path.isdir(os.path.join(data_dir, item)) and (item.isdigit() or item == "@team")]
+        if fnos_targets:
+            return fnos_targets
+
+        # 2. 通用 NAS (Synology, QNAP, Linux)：探索 /data 下所有非隱藏目錄
+        generic_targets = [item for item in sorted(os.listdir(data_dir))
+                           if os.path.isdir(os.path.join(data_dir, item)) and not item.startswith(".")]
+        if generic_targets:
+            return generic_targets
+
+    return DEFAULT_DATA_FOLDERS
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -343,14 +353,15 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
 
     # 2. 本地儲存池
     targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
+    nas_dir_disp = os.environ.get("NAS_DATA_DIR", "/vol1")
     if local_stat:
         local_sec = (
-            f"🖥️ <b>本地陣列 (/vol1)</b>\n"
+            f"🖥️ <b>本地陣列 ({nas_dir_disp})</b>\n"
             f"• 儲存水位：<b>{local_stat['used_gb']:.1f} GB</b> / {local_stat['total_tb']:.1f} TB (剩 {local_stat['free_tb']:.1f} TB)\n"
             f"• 納管目錄：{targets_str}"
         )
     else:
-        local_sec = f"🖥️ <b>本地陣列</b>\n• 納管目錄：{targets_str}"
+        local_sec = f"🖥️ <b>本地陣列 ({nas_dir_disp})</b>\n• 納管目錄：{targets_str}"
 
     # 3. 雲端儲存池現況 (緊湊單行化，告別冗長膨脹)
     cloud_lines = ["☁️ <b>雲端儲存池現況 (已用 ｜ 剩餘可用)</b>"]
@@ -370,7 +381,7 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
             label = c_name
 
         icon = "🟢" if c_stat["all_ok"] else "🔴"
-        cloud_lines.append(f"• {label}：{c_stat['used_gb']:.1f} GB ｜ 剩 <b>{c_stat['free_tb']:.1f} TB</b> {icon}")
+        cloud_lines.append(f"• {label}：{icon} {c_stat['used_gb']:.1f} GB (餘 {c_stat['free_tb']:.1f} TB)")
 
     cloud_sec = "\n".join(cloud_lines)
 
@@ -402,17 +413,17 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     if has_gdrive:
         tree_lines = [
             f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
-            f"├ 本地實體陣列：🟢 正常 (RAID 10)",
-            f"├ OD1 微軟主本：{'🟢 正常 (M365 跨租戶)' if phase1_success else '🔴 異常'}",
-            f"├ OD2 微軟鏡像：{'🟢 正常 (M365 雙副本)' if phase2_success else '🔴 異常'}",
-            f"└ GD1 谷歌鏡像：{'🟢 正常 (Google 5TB 鏡像)' if all_clusters_ok else '🔴 異常'}"
+            f"├ 本地實體陣列：🟢 正常",
+            f"├ OD1 微軟主本：{'🟢 M365 跨租戶' if phase1_success else '🔴 異常'}",
+            f"├ OD2 微軟鏡像：{'🟢 M365 雙副本' if phase2_success else '🔴 異常'}",
+            f"└ GD1 谷歌鏡像：{'🟢 Google 5TB' if all_clusters_ok else '🔴 異常'}"
         ]
     else:
         tree_lines = [
             f"🛡️ <b>3-2-1 容災鏈路檢核：{sla_status}</b>",
-            f"├ 本地實體陣列：🟢 正常 (RAID 10)",
-            f"├ OD1 微軟主本：{'🟢 正常 (M365 跨租戶)' if phase1_success else '🔴 異常'}",
-            f"└ OD2 微軟鏡像：{'🟢 正常 (M365 雙副本)' if phase2_success else '🔴 異常'}"
+            f"├ 本地實體陣列：🟢 正常",
+            f"├ OD1 微軟主本：{'🟢 M365 跨租戶' if phase1_success else '🔴 異常'}",
+            f"└ OD2 微軟鏡像：{'🟢 M365 雙副本' if phase2_success else '🔴 異常'}"
         ]
     sla_sec = "\n".join(tree_lines)
 
