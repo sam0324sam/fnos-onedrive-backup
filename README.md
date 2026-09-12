@@ -67,11 +67,11 @@ graph TD
 
     HDD -->|唯讀增量掃描| Crypt
     SSD -.->|Docker 快照打包| Crypt
-    Crypt ==>|本地直推 (15~20 MB/s)| OD1
-    Crypt ==>|本地直推 (15~20 MB/s)| OD2
-    Crypt ==>|本地直推 (15~20 MB/s)| GD1
+    Crypt -->|本地直推 15-20 MB/s| OD1
+    Crypt -->|本地直推 15-20 MB/s| OD2
+    Crypt -->|本地直推 15-20 MB/s| GD1
 
-    Guard -->|每日 02:00 / 巡檢告警| TG["📱 Telegram 機器人通知"]
+    Guard -->|每日 02:00 巡檢戰報| TG["📱 Telegram 機器人通知"]
 ```
 
 ---
