@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fnOS 4-3-2 Dual-Cloud Enterprise Direct Backup and Health Guard
-- Phase 0: Docker GFS Snapshots -> Multi-Cloud (OD1, OD2, GD1)
+fnOS 4-3-2 Enterprise Multi-Cloud Direct Backup and Health Guard
+- Phase 0: Docker GFS Snapshots -> Multi-Cloud (OD1, GD1, GD2)
 - Node 1: Local NAS (/vol1) -> od1_crypt (Microsoft Primary, XSalsa20 Encrypted)
-- Node 2: Local NAS (/vol1) -> od2_crypt (Microsoft Mirror, XSalsa20 Encrypted)
-- Node 3: Local NAS (/vol1) -> gd1_crypt (Google Drive 5TB Mirror, XSalsa20 Encrypted)
+- Node 2: Local NAS (/vol1) -> gd1_crypt (Google Drive 5TB Mirror 1, XSalsa20 Encrypted)
+- Node 3: Local NAS (/vol1) -> gd2_crypt (Google Drive 5TB Mirror 2, XSalsa20 Encrypted)
 - Pre-flight Health and Capacity Guard with Telegram Executive Alerting
 """
 
@@ -265,17 +265,34 @@ def get_local_storage_stats(path="/data") -> dict:
         logging.error(f"Error reading disk usage for {path}: {e}")
         return {}
 
+def get_cluster_label(name: str) -> str:
+    """自動依據集群或加密層代號返回易讀的業務顯示名稱"""
+    clean = name.replace("_union", "").replace("_crypt", "")
+    if clean == "od1":
+        return "OD1 微軟主本"
+    elif clean == "od2":
+        return "OD2 微軟鏡像"
+    elif clean == "gd1":
+        return "GD1 谷歌鏡像1"
+    elif clean == "gd2":
+        return "GD2 谷歌鏡像2"
+    elif clean.startswith("gd"):
+        return f"{clean.upper()} 谷歌鏡像"
+    elif clean.startswith("od"):
+        return f"{clean.upper()} 微軟鏡像"
+    return clean.upper()
+
 def get_all_union_clusters() -> list:
-    """自動從 rclone.conf 中搜尋所有合流池/集群 (如 od1_union, od2_union, 或未來新增的 gdrive_union 等)"""
+    """自動從 rclone.conf 中搜尋所有合流池/集群 (動態支援 OD1, GD1, GD2 等)"""
     if not os.path.exists(CONFIG_PATH):
-        return ["od1_union", "od2_union"]
+        return ["od1_union", "gd1_union", "gd2_union"]
     cfg = configparser.ConfigParser()
     cfg.read(CONFIG_PATH, encoding="utf-8")
     clusters = []
     for sec in cfg.sections():
         if sec.endswith("_union"):
             clusters.append(sec)
-    return clusters if clusters else ["od1_union", "od2_union"]
+    return clusters if clusters else ["od1_union", "gd1_union", "gd2_union"]
 
 def get_cluster_stats(cluster_name: str) -> dict:
     """動態計算單一雲端合流池內所有帳號之總量、已用、剩餘與健康狀態"""
@@ -340,16 +357,17 @@ def get_cluster_stats(cluster_name: str) -> dict:
         "all_ok": all_ok
     }
 
-def generate_daily_executive_report(duration_str: str, phase1_success: bool, phase2_success: bool, targets: list, docker_msg: str = "", phase3_msg: str = "", phase4_msg: str = "") -> str:
-    """產出適合手機 Telegram 閱讀、徹底杜絕斷字折行的 4-3-2 現代極簡卡片風每日維運日報"""
+def generate_daily_executive_report(duration_str: str, sync_results: dict, targets: list, docker_msg: str = "") -> str:
+    """產出適合手機 Telegram 閱讀、動態適應多雲叢集之 4-3-2 現代極簡卡片風每日維運日報"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_stat = get_local_storage_stats("/data")
     clusters = get_all_union_clusters()
-    has_gdrive = "gd1_union" in clusters
+    has_gdrive = any("gd" in c for c in clusters)
+    has_onedrive = any("od" in c for c in clusters)
 
     # 1. 標題與基本規格
     title_prefix = "【fnOS 備份體系每日維運日報】"
-    spec_label = "4-3-2 雙雲端容災" if has_gdrive else "3-2-1 雙微軟租戶"
+    spec_label = "4-3-2 雙雲端容災" if (has_gdrive and has_onedrive) else f"{len(clusters)+1}-3-2 多雲容災"
 
     # 2. 本地儲存池
     targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
@@ -363,71 +381,58 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     else:
         local_sec = f"🖥️ <b>本地陣列 ({nas_dir_disp})</b>\n• 納管目錄：{targets_str}"
 
-    # 3. 雲端儲存池現況 (緊湊單行化，告別冗長膨脹)
+    # 3. 雲端儲存池現況 (緊湊單行化)
     cloud_lines = ["☁️ <b>雲端儲存池現況 (已用 ｜ 剩餘可用)</b>"]
     all_clusters_ok = True
     for c_name in clusters:
         c_stat = get_cluster_stats(c_name)
         if not c_stat["all_ok"]:
             all_clusters_ok = False
-
-        if "od1" in c_name:
-            label = "OD1 微軟主本"
-        elif "od2" in c_name:
-            label = "OD2 微軟鏡像"
-        elif "gd" in c_name:
-            label = "GD1 谷歌鏡像"
-        else:
-            label = c_name
-
+        label = get_cluster_label(c_name)
         icon = "🟢" if c_stat["all_ok"] else "🔴"
         cloud_lines.append(f"• {label}：{icon} {c_stat['used_gb']:.1f} GB (餘 {c_stat['free_tb']:.1f} TB)")
 
     cloud_sec = "\n".join(cloud_lines)
 
-    # 4. 本次備份傳輸結果 (單行簡潔，杜絕斷字折行)
-    phase1_status = "✅ 成功 (本地直傳)" if phase1_success else "❌ 異常"
-    phase2_status = "✅ 成功 (本地直傳)" if phase2_success else "❌ 異常"
-    transfer_lines = [
-        "⚡ <b>本次備份傳輸結果 (多雲並行直灌)</b>",
-        f"• OD1 微軟主本：{phase1_status}",
-        f"• OD2 微軟鏡像：{phase2_status}"
-    ]
-    if has_gdrive:
-        phase3_display = phase3_msg if phase3_msg else "✅ 成功 (增量同步)"
-        transfer_lines.append(f"• GD1 谷歌鏡像：{phase3_display}")
+    # 4. 本次備份傳輸結果 (動態多雲直灌)
+    transfer_lines = ["⚡ <b>本次備份傳輸結果 (多雲並行直灌)</b>"]
+    all_sync_ok = True
+    for c_name in clusters:
+        crypt_name = c_name.replace("_union", "_crypt")
+        label = get_cluster_label(c_name)
+        res = sync_results.get(crypt_name, (True, "✅ 成功 (本地直傳)"))
+        status_ok = res[0]
+        status_msg = res[1]
+        if not status_ok:
+            all_sync_ok = False
+        transfer_lines.append(f"• {label}：{status_msg}")
+
     if docker_msg:
         m_sz = re.search(r"(\d+\.?\d*\s+[KMGTP]B)", docker_msg)
-        if m_sz:
-            clean_docker = f"✅ {m_sz.group(1)} (GFS 階梯)"
-        else:
-            clean_docker = "✅ 已封存 (GFS 階梯)"
+        clean_docker = f"✅ {m_sz.group(1)} (GFS 階梯)" if m_sz else "✅ 已封存 (GFS 階梯)"
         transfer_lines.append(f"• Docker 快照 ：{clean_docker}")
     transfer_lines.append(f"• 總執行耗時  ：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
-    # 5. 容災鏈路檢核 (垂直樹狀圖，杜絕橫向擠壓斷截)
-    is_fully_compliant = phase1_success and phase2_success and all_clusters_ok
+    # 5. 容災鏈路檢核 (垂直樹狀圖)
+    is_fully_compliant = all_sync_ok and all_clusters_ok
     sla_status = "完全合規 🟢" if is_fully_compliant else "鏈路警示 ⚠️"
-
-    if has_gdrive:
-        tree_lines = [
-            f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
-            f"├ 本地實體陣列：🟢 正常",
-            f"├ OD1 微軟主本：{'🟢 M365 跨租戶' if phase1_success else '🔴 異常'}",
-            f"├ OD2 微軟鏡像：{'🟢 M365 雙副本' if phase2_success else '🔴 異常'}",
-            f"└ GD1 谷歌鏡像：{'🟢 Google 5TB' if all_clusters_ok else '🔴 異常'}"
-        ]
-    else:
-        tree_lines = [
-            f"🛡️ <b>3-2-1 容災鏈路檢核：{sla_status}</b>",
-            f"├ 本地實體陣列：🟢 正常",
-            f"├ OD1 微軟主本：{'🟢 M365 跨租戶' if phase1_success else '🔴 異常'}",
-            f"└ OD2 微軟鏡像：{'🟢 M365 雙副本' if phase2_success else '🔴 異常'}"
-        ]
+    tree_lines = [
+        f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
+        f"├ 本地實體陣列：🟢 正常"
+    ]
+    for idx, c_name in enumerate(clusters):
+        is_last = (idx == len(clusters) - 1)
+        branch = "└" if is_last else "├"
+        crypt_name = c_name.replace("_union", "_crypt")
+        label = get_cluster_label(c_name)
+        c_ok = sync_results.get(crypt_name, (True, ""))[0]
+        sub_desc = "Google 5TB" if "gd" in c_name else "M365 5TB"
+        node_str = f"🟢 {sub_desc}" if c_ok else "🔴 異常"
+        tree_lines.append(f"{branch} {label}：{node_str}")
     sla_sec = "\n".join(tree_lines)
 
-    # 6. 32G 隨身碟時光機狀態 (納入日報完整閉環)
+    # 6. 32G 隨身碟時光機狀態
     usb_sec = ""
     if os.path.exists(SYSTEM_BACKUP_DIR):
         latest_archive = os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_latest.tar.zst")
@@ -453,54 +458,32 @@ def generate_daily_executive_report(duration_str: str, phase1_success: bool, pha
     return full_report
 
 def run_health_guard() -> tuple[bool, str]:
-    """Check OD1, OD2, and GD1 pool health and space"""
-    od1_remotes = parse_union_upstreams("od1_union")
-    od2_remotes = parse_union_upstreams("od2_union")
-    gd1_remotes = parse_union_upstreams("gd1_union")
-
-    if not od1_remotes or not od2_remotes:
-        msg = "⚠️ <b>【備份配置缺失】</b>\n未在 <code>rclone.conf</code> 中找到 <code>od1_union</code> 或 <code>od2_union</code> 的成員帳號，請先完成帳號授權配置！"
+    """動態檢查所有已配置的合流池 (OD1, GD1, GD2 等) 之帳號健康與容量"""
+    clusters = get_all_union_clusters()
+    if not clusters:
+        msg = "⚠️ <b>【備份配置缺失】</b>\n未在 <code>rclone.conf</code> 中找到任何有效的 <code>*_union</code> 集群，請先完成帳號授權配置！"
         send_telegram(msg)
         return False, "CONFIG_MISSING"
 
-    logging.info(f"Checking OD1 upstreams: {od1_remotes}")
-    logging.info(f"Checking OD2 upstreams: {od2_remotes}")
-    if gd1_remotes:
-        logging.info(f"Checking GD1 upstreams: {gd1_remotes}")
-
-    od1_status = [check_remote_quota(r) for r in od1_remotes]
-    od2_status = [check_remote_quota(r) for r in od2_remotes]
-    gd1_status = [check_remote_quota(r) for r in gd1_remotes] if gd1_remotes else []
-
     critical_errors = []
     low_space_warnings = []
+    has_healthy_space = False
 
-    # Evaluate OD1
-    od1_has_healthy_space = False
-    for s in od1_status:
-        if s["status"] == "ERROR":
-            critical_errors.append(f"• <b>OD1 主集群 [{s['remote']}]</b> 連線異常/失效：{s['error']}")
-        elif s["status"] == "LOW_SPACE":
-            low_space_warnings.append(f"• <b>OD1 主集群 [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
-        else:
-            od1_has_healthy_space = True
-
-    # Evaluate OD2
-    od2_has_healthy_space = False
-    for s in od2_status:
-        if s["status"] == "ERROR":
-            critical_errors.append(f"• <b>OD2 鏡像集群 [{s['remote']}]</b> 連線異常/失效：{s['error']}")
-        elif s["status"] == "LOW_SPACE":
-            low_space_warnings.append(f"• <b>OD2 鏡像集群 [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
-        else:
-            od2_has_healthy_space = True
-
-    # Evaluate GD1
-    for s in gd1_status:
-        if s["status"] == "ERROR":
-            critical_errors.append(f"• <b>GD1 谷歌集群 [{s['remote']}]</b> 連線異常/失效：{s['error']}")
-        elif s["status"] == "LOW_SPACE":
-            low_space_warnings.append(f"• <b>GD1 谷歌集群 [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
+    for c_name in clusters:
+        upstreams = parse_union_upstreams(c_name)
+        if not upstreams:
+            critical_errors.append(f"• <b>{get_cluster_label(c_name)}</b> 未在 rclone.conf 配置成員帳號")
+            continue
+        logging.info(f"Checking {c_name} upstreams: {upstreams}")
+        for r in upstreams:
+            s = check_remote_quota(r)
+            lbl = get_cluster_label(c_name)
+            if s["status"] == "ERROR":
+                critical_errors.append(f"• <b>{lbl} [{s['remote']}]</b> 連線異常/失效：{s['error']}")
+            elif s["status"] == "LOW_SPACE":
+                low_space_warnings.append(f"• <b>{lbl} [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (< {FREE_THRESHOLD_GB} GB)")
+            else:
+                has_healthy_space = True
 
     if critical_errors:
         alert_msg = (
@@ -511,11 +494,11 @@ def run_health_guard() -> tuple[bool, str]:
         send_telegram(alert_msg)
         return False, "ACCOUNT_ERROR"
 
-    if low_space_warnings and not od1_has_healthy_space:
+    if low_space_warnings and not has_healthy_space:
         alert_msg = (
             "⚠️ <b>【fnOS 備份系統 - 空間耗盡警報】</b>\n"
             + "\n".join(low_space_warnings)
-            + f"\n\n📢 <b>請盡快新增 5TB 帳號擴充電腦池！</b>\n加入新帳號至 <code>od1_union</code> 後，系統將自動接續同步。"
+            + f"\n\n📢 <b>請盡快新增 5TB 帳號擴充電腦池！</b>"
         )
         send_telegram(alert_msg)
         return False, "SPACE_EXHAUSTED"
@@ -586,9 +569,8 @@ def prune_gfs_snapshots(remote_dir: str):
 def execute_docker_gfs_backup() -> tuple[bool, str]:
     """
     1. 打包 /docker_src 排除無效暫存與日誌
-    2. 上傳至 od1_crypt:docker_snapshots/
+    2. 動態分發快照至所有啟用之雲端加密目錄 (如 od1_crypt, gd1_crypt, gd2_crypt)
     3. 執行 GFS (14天日備份 + 8週週備份 + 12個月月備份) 生命週期修剪
-    4. 同步修剪 od2_crypt:docker_snapshots/ 確保副本一致性
     """
     if not os.path.exists(DOCKER_SRC):
         logging.info(f"Docker source path {DOCKER_SRC} not found, skipping docker backup.")
@@ -620,13 +602,12 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
     archive_size_mb = os.path.getsize(staging_archive) / (1024 * 1024)
     logging.info(f"Docker archive created successfully ({archive_size_mb:.1f} MB). Uploading to multi-cloud...")
 
-    # 本地直接分發快照至三雲加密目錄
-    destinations = [
-        ("od1_crypt:docker_snapshots/", "OD1 微軟主本"),
-        ("od2_crypt:docker_snapshots/", "OD2 微軟鏡像")
-    ]
-    if "gd1_union" in get_all_union_clusters():
-        destinations.append(("gd1_crypt:docker_snapshots/", "GD1 谷歌鏡像"))
+    # 本地直接分發快照至所有啟用之雲端加密目錄
+    clusters = get_all_union_clusters()
+    destinations = []
+    for c in clusters:
+        c_crypt = c.replace("_union", "_crypt")
+        destinations.append((f"{c_crypt}:docker_snapshots/", get_cluster_label(c)))
 
     upload_success = True
     for dst, label in destinations:
@@ -652,10 +633,9 @@ def execute_docker_gfs_backup() -> tuple[bool, str]:
             pass
 
     # 執行多集群 GFS 梯次清理
-    prune_gfs_snapshots("od1_crypt:docker_snapshots")
-    prune_gfs_snapshots("od2_crypt:docker_snapshots")
-    if "gd1_union" in get_all_union_clusters():
-        prune_gfs_snapshots("gd1_crypt:docker_snapshots")
+    for c in clusters:
+        c_crypt = c.replace("_union", "_crypt")
+        prune_gfs_snapshots(f"{c_crypt}:docker_snapshots")
 
     if not upload_success:
         return False, "部分雲端快照上傳失敗"
@@ -766,11 +746,13 @@ def generate_realtime_status_report() -> str:
                 active_transfers.append((remote, folder))
 
     # 2. 雲端容災節點掃描
-    clouds = [
-        ("od1_crypt", "OD1 微軟主本", "od1"),
-        ("od2_crypt", "OD2 微軟鏡像", "od2"),
-        ("gd1_crypt", "GD1 谷歌鏡像", "gd1")
-    ]
+    clusters = get_all_union_clusters()
+    clouds = []
+    for c in clusters:
+        prefix = c.replace("_union", "")
+        remote = f"{prefix}_crypt"
+        label = get_cluster_label(c)
+        clouds.append((remote, label, prefix))
 
     lines.append("☁️ <b>各雲端容災節點狀態</b>")
     for remote, label, prefix in clouds:
@@ -863,9 +845,10 @@ def generate_realtime_status_report() -> str:
     if docker_info:
         lines.append(f"• 最新封存：<b>{docker_info[1]}</b> (<code>{docker_info[0]}</code>)")
         lines.append("• 階梯保留：✅ 正常 (14天日備 + 8週週備 + 12月月備)")
-        lines.append("• 多雲同步：已同步至 OD1、OD2、GD1 加密池")
+        all_labels = "、".join([get_cluster_label(c).split()[0] for c in clusters])
+        lines.append(f"• 多雲同步：已同步至 {all_labels} 加密池")
     else:
-        lines.append("• 階梯保留：✅ 每日 02:00 自動封存並推播三雲")
+        lines.append("• 階梯保留：✅ 每日 02:00 自動封存並推播多雲")
     lines.append("")
 
     # 5. NAS 主機硬體狀態
@@ -1038,7 +1021,7 @@ def sync_local_to_cloud(target_crypt: str, cloud_label: str, targets: list, log_
 
 # ================= Sync Logic =================
 def execute_backup():
-    """執行全流程備份：Docker GFS 多雲分發 + 本地三雲直傳 (OD1 ➜ OD2 ➜ GD1)"""
+    """執行全流程備份：Docker GFS 多雲分發 + 本地多雲並行直傳 (動態支援 OD1, GD1, GD2 等)"""
     logging.info("Starting Direct Multi-Cloud Backup Workflow...")
     start_time = time.time()
 
@@ -1055,28 +1038,35 @@ def execute_backup():
     targets = get_backup_targets()
     logging.info(f"Discovered backup target folders: {targets}")
 
-    has_gdrive = "gd1_union" in get_all_union_clusters()
+    clusters = get_all_union_clusters()
+    logging.info(f"=== Starting Concurrent Direct Sync to Multi-Cloud ({', '.join(clusters)}) ===")
+    sync_results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(clusters))) as executor:
+        future_map = {}
+        for c in clusters:
+            prefix = c.replace("_union", "")
+            crypt_name = f"{prefix}_crypt"
+            label = get_cluster_label(c)
+            f = executor.submit(sync_local_to_cloud, crypt_name, label, targets, f"sync_{prefix}")
+            future_map[f] = crypt_name
 
-    # 3. 三雲端全並行直灌 (OD1, OD2, GD1 同時並行)
-    logging.info("=== Starting Concurrent Direct Sync to Multi-Cloud (OD1, OD2, GD1) ===")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_od1 = executor.submit(sync_local_to_cloud, "od1_crypt", "OD1 微軟主儲存", targets, "sync_od1")
-        future_od2 = executor.submit(sync_local_to_cloud, "od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
-        future_gd1 = executor.submit(sync_local_to_cloud, "gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1") if has_gdrive else None
-
-        ok1, msg1 = future_od1.result()
-        ok2, msg2 = future_od2.result()
-        ok3, msg3 = future_gd1.result() if future_gd1 else (True, "未配置略過")
+        for f in concurrent.futures.as_completed(future_map):
+            crypt_name = future_map[f]
+            try:
+                ok, msg = f.result()
+                sync_results[crypt_name] = (ok, msg)
+            except Exception as e:
+                sync_results[crypt_name] = (False, f"❌ 異常: {e}")
 
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    report_msg = generate_daily_executive_report(duration_str, ok1, ok2, targets, docker_msg, msg3)
+    report_msg = generate_daily_executive_report(duration_str, sync_results, targets, docker_msg)
     send_telegram(report_msg)
 
 def execute_mirrors_only():
-    """專用立即觸發：本地直接並行同步鏡像雲端 (OD2 + GD1 全並行)"""
-    logging.info("Starting Direct Local -> Mirrors Concurrent Sync (OD2 + GD1)...")
+    """專用立即觸發：本地直接並行同步所有鏡像雲端 (排除主儲存 OD1)"""
+    logging.info("Starting Direct Local -> Mirrors Concurrent Sync...")
     start_time = time.time()
 
     can_proceed, status = run_health_guard()
@@ -1087,26 +1077,41 @@ def execute_mirrors_only():
     targets = get_backup_targets()
     logging.info(f"Discovered backup target folders: {targets}")
 
-    has_gdrive = "gd1_union" in get_all_union_clusters()
+    all_clusters = get_all_union_clusters()
+    mirror_clusters = [c for c in all_clusters if not c.startswith("od1")]
+    if not mirror_clusters:
+        logging.warning("No mirror clusters found in config.")
+        return
 
-    logging.info("=== Starting Concurrent Direct Sync to Mirrors (OD2 & GD1) ===")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_od2 = executor.submit(sync_local_to_cloud, "od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
-        future_gd1 = executor.submit(sync_local_to_cloud, "gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1") if has_gdrive else None
+    logging.info(f"=== Starting Concurrent Direct Sync to Mirrors ({', '.join(mirror_clusters)}) ===")
+    sync_results = {
+        "od1_crypt": (True, "⚪ 主本略過 (僅同步鏡像)")
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(mirror_clusters))) as executor:
+        future_map = {}
+        for c in mirror_clusters:
+            prefix = c.replace("_union", "")
+            crypt_name = f"{prefix}_crypt"
+            label = get_cluster_label(c)
+            f = executor.submit(sync_local_to_cloud, crypt_name, label, targets, f"sync_{prefix}")
+            future_map[f] = crypt_name
 
-        ok2, msg2 = future_od2.result()
-        ok3, msg3 = future_gd1.result() if future_gd1 else (True, "未配置略過")
+        for f in concurrent.futures.as_completed(future_map):
+            crypt_name = future_map[f]
+            try:
+                ok, msg = f.result()
+                sync_results[crypt_name] = (ok, msg)
+            except Exception as e:
+                sync_results[crypt_name] = (False, f"❌ 異常: {e}")
 
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
     report_msg = generate_daily_executive_report(
         duration_str,
-        True,
-        ok2,
+        sync_results,
         targets,
-        "✅ 已就緒 (前次已封存)",
-        msg3
+        "✅ 已就緒 (前次已封存)"
     )
     send_telegram(report_msg)
 
@@ -1148,13 +1153,14 @@ def run_daemon():
         time.sleep(30)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="fnOS 4-3-2 Dual-Cloud Direct Backup Manager")
+    parser = argparse.ArgumentParser(description="fnOS 4-3-2 Multi-Cloud Direct Backup Manager")
     parser.add_argument("--check-only", action="store_true", help="Only run health & capacity check")
     parser.add_argument("--docker-backup-now", action="store_true", help="Run Docker GFS snapshot and upload now")
     parser.add_argument("--sync-od1-now", action="store_true", help="Sync local NAS -> OD1 only")
-    parser.add_argument("--sync-od2-now", action="store_true", help="Sync local NAS -> OD2 only")
+    parser.add_argument("--sync-od2-now", action="store_true", help="Sync local NAS -> OD2 only (Legacy/Fallback)")
     parser.add_argument("--sync-gd1-now", action="store_true", help="Sync local NAS -> GD1 only")
-    parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> OD2 and GD1 mirrors directly")
+    parser.add_argument("--sync-gd2-now", action="store_true", help="Sync local NAS -> GD2 only")
+    parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> all mirrors directly (GD1, GD2, etc.)")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup to all clouds directly from NAS")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--status", action="store_true", help="Generate and print realtime status report (also sends to Telegram if configured)")
@@ -1176,14 +1182,22 @@ if __name__ == "__main__":
         success, msg = sync_local_to_cloud("od2_crypt", "OD2 微軟鏡像副本", targets, "sync_od2")
         print(f"OD2 Sync Result: {success} -> {msg}")
     elif args.sync_gd1_now:
-        success, msg = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像副本", targets, "sync_gd1")
+        success, msg = sync_local_to_cloud("gd1_crypt", "GD1 谷歌鏡像1", targets, "sync_gd1")
         print(f"GD1 Sync Result: {success} -> {msg}")
+    elif args.sync_gd2_now:
+        success, msg = sync_local_to_cloud("gd2_crypt", "GD2 谷歌鏡像2", targets, "sync_gd2")
+        print(f"GD2 Sync Result: {success} -> {msg}")
     elif args.sync_mirrors_now:
         execute_mirrors_only()
     elif args.sync_now:
         execute_backup()
     elif args.test_report:
-        report = generate_daily_executive_report("測試 (0 分 0 秒)", True, True, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", "✅ 成功 (已加密鏡像)")
+        clusters = get_all_union_clusters()
+        mock_sync_results = {
+            c.replace("_union", "_crypt"): (True, "✅ 成功 (本地直傳)")
+            for c in clusters
+        }
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", mock_sync_results, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)")
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")

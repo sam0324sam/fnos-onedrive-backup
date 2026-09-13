@@ -1,9 +1,10 @@
 # ================================================================
-# fnOS 5-4-3 跨雲端三雲鼎立備份 Rclone 配置範本 (rclone.conf.example)
+# fnOS 4-3-2 跨雲端雙巨頭備份 Rclone 配置範本 (rclone.conf.example)
+# 架構：OD1 (微軟 5TB 主儲存) + GD1 (谷歌 5TB 鏡像一) + GD2 (谷歌 5TB 鏡像二)
 # 請複製此檔為 rclone.conf，並填入實際 Token 與加密密鑰
 # ================================================================
 
-# ---------- 集群 1 (主儲存 OD1 Pool) ----------
+# ---------- 集群 1 (微軟主儲存 OD1 Pool) ----------
 [od1_1]
 type = onedrive
 drive_id = YOUR_DRIVE_ID_1
@@ -33,37 +34,7 @@ filename_encryption = off
 directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
 
-# ---------- 集群 2 (異地鏡像 OD2 Pool) ----------
-[od2_1]
-type = onedrive
-drive_id = YOUR_DRIVE_ID_2
-drive_type = business
-token = {"access_token":"YOUR_ACCESS_TOKEN","token_type":"Bearer","refresh_token":"YOUR_REFRESH_TOKEN","expiry":"2026-09-06T18:00:00.0000000+08:00"}
-access_scopes = Files.Read Files.ReadWrite offline_access
-
-# [虛擬合流層 - 單帳號 alias 模式]
-[od2_union]
-type = alias
-remote = od2_1:fnOS_Backup
-
-# [多帳號擴充模式 - 方案 A 循序填滿 (Sequential Fill / 溢流模式)]
-# 當接入第 2 個帳號 (od2_2) 時，註解上方 alias，改用下方 union 設定：
-# [od2_union]
-# type = union
-# upstreams = od2_1:fnOS_Backup od2_2:fnOS_Backup
-# action_policy = epff
-# create_policy = ff
-# min_free_space = 50G
-
-# [鏡像解密測試層 (驗證用)]
-[od2_crypt]
-type = crypt
-remote = od2_union:
-filename_encryption = off
-directory_name_encryption = false
-password = YOUR_OBSCURED_PASSWORD
-
-# ---------- 集群 3 (Google Drive 5TB 國際公有雲鏡像 GD1 Pool) ----------
+# ---------- 集群 2 (Google Drive 5TB 國際公有雲鏡像一 GD1 Pool) ----------
 [gd1_1]
 type = drive
 scope = drive
@@ -74,19 +45,49 @@ token = {"access_token":"YOUR_ACCESS_TOKEN","token_type":"Bearer","refresh_token
 type = alias
 remote = gd1_1:fnOS_Backup
 
-# [多帳號擴充模式 - 方案 A 循序填滿 (Sequential Fill / 溢流模式)]
-# 當接入第 2 個帳號 (gd1_2) 時，註解上方 alias，改用下方 union 設定：
-# [gd1_union]
-# type = union
-# upstreams = gd1_1:fnOS_Backup gd1_2:fnOS_Backup
-# action_policy = epff
-# create_policy = ff
-# min_free_space = 50G
-
-# [GD1 客戶端強加密還原層 (XSalsa20)]
+# [客戶端強加密還原層 (XSalsa20)]
 [gd1_crypt]
 type = crypt
 remote = gd1_union:
 filename_encryption = off
 directory_name_encryption = false
 password = YOUR_OBSCURED_PASSWORD
+
+# ---------- 集群 3 (Google Drive 5TB 國際公有雲鏡像二 GD2 Pool) ----------
+[gd2_1]
+type = drive
+scope = drive
+token = {"access_token":"YOUR_ACCESS_TOKEN","token_type":"Bearer","refresh_token":"YOUR_REFRESH_TOKEN","expiry":"2026-09-06T18:00:00.0000000+08:00"}
+
+# [虛擬合流層 - 單帳號 alias 模式]
+[gd2_union]
+type = alias
+remote = gd2_1:fnOS_Backup
+
+# [客戶端強加密還原層 (XSalsa20)]
+[gd2_crypt]
+type = crypt
+remote = gd2_union:
+filename_encryption = off
+directory_name_encryption = false
+password = YOUR_OBSCURED_PASSWORD
+
+# ---------- (選用/歷史) 集群 OD2 (微軟第二租戶鏡像) ----------
+# 若有第二個獨立微軟租戶，可取消以下註解啟用：
+# [od2_1]
+# type = onedrive
+# drive_id = YOUR_DRIVE_ID_2
+# drive_type = business
+# token = {"access_token":"YOUR_ACCESS_TOKEN","token_type":"Bearer","refresh_token":"YOUR_REFRESH_TOKEN","expiry":"2026-09-06T18:00:00.0000000+08:00"}
+# access_scopes = Files.Read Files.ReadWrite offline_access
+#
+# [od2_union]
+# type = alias
+# remote = od2_1:fnOS_Backup
+#
+# [od2_crypt]
+# type = crypt
+# remote = od2_union:
+# filename_encryption = off
+# directory_name_encryption = false
+# password = YOUR_OBSCURED_PASSWORD
