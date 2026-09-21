@@ -22,6 +22,8 @@ import re
 import shutil
 import glob
 import threading
+import hashlib
+import random
 import urllib.request
 import urllib.parse
 import concurrent.futures
@@ -357,7 +359,7 @@ def get_cluster_stats(cluster_name: str) -> dict:
         "all_ok": all_ok
     }
 
-def generate_daily_executive_report(duration_str: str, sync_results: dict, targets: list, docker_msg: str = "") -> str:
+def generate_daily_executive_report(duration_str: str, sync_results: dict, targets: list, docker_msg: str = "", integrity_results: dict = None) -> str:
     """產出適合手機 Telegram 閱讀、動態適應多雲叢集之 4-3-2 現代極簡卡片風每日維運日報"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     local_stat = get_local_storage_stats("/data")
@@ -414,8 +416,31 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     transfer_lines.append(f"• 總執行耗時  ：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
-    # 5. 容災鏈路檢核 (垂直樹狀圖)
-    is_fully_compliant = all_sync_ok and all_clusters_ok
+    # 5. 端到端資料完整性驗證 (隨機金絲雀抽樣)
+    integrity_sec = ""
+    int_clusters = integrity_results.get("clusters", {}) if integrity_results else {}
+    if integrity_results and integrity_results.get("samples_count", 0) > 0:
+        int_lines = [
+            "🧬 <b>端到端資料完整性驗證 (隨機金絲雀抽樣)</b>",
+            f"• 抽樣規模：隨機 {integrity_results['samples_count']} 份小檔案 (SHA-256 逐位元比對)"
+        ]
+        for c_name in clusters:
+            crypt_name = c_name.replace("_union", "_crypt")
+            label = get_cluster_label(c_name)
+            stat = int_clusters.get(crypt_name)
+            if stat:
+                if stat["is_ok"]:
+                    int_lines.append(f"• {label}：✅ {stat['passed']}/{stat['total']} 一致 (解密無損)")
+                else:
+                    failed_hint = f" ({len(stat['failed'])} 異常)"
+                    int_lines.append(f"• {label}：🔴 {stat['passed']}/{stat['total']} 一致{failed_hint}")
+            else:
+                int_lines.append(f"• {label}：⚪ 未檢驗")
+        integrity_sec = "\n".join(int_lines) + "\n\n"
+
+    # 6. 容災鏈路檢核 (垂直樹狀圖)
+    all_integrity_ok = integrity_results.get("all_ok", True) if integrity_results else True
+    is_fully_compliant = all_sync_ok and all_clusters_ok and all_integrity_ok
     sla_status = "完全合規 🟢" if is_fully_compliant else "鏈路警示 ⚠️"
     tree_lines = [
         f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
@@ -427,12 +452,15 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
         crypt_name = c_name.replace("_union", "_crypt")
         label = get_cluster_label(c_name)
         c_ok = sync_results.get(crypt_name, (True, ""))[0]
+        c_int = int_clusters.get(crypt_name)
+        c_verified = c_int.get("is_ok", True) if c_int else True
         sub_desc = "Google 5TB" if "gd" in c_name else "M365 5TB"
-        node_str = f"🟢 {sub_desc}" if c_ok else "🔴 異常"
+        badge = " ｜ 驗證無損" if (c_int and c_verified) else ""
+        node_str = f"🟢 {sub_desc}{badge}" if (c_ok and c_verified) else "🔴 異常"
         tree_lines.append(f"{branch} {label}：{node_str}")
     sla_sec = "\n".join(tree_lines)
 
-    # 6. 32G 隨身碟時光機狀態
+    # 7. 32G 隨身碟時光機狀態
     usb_sec = ""
     if os.path.exists(SYSTEM_BACKUP_DIR):
         latest_archive = os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_latest.tar.zst")
@@ -451,6 +479,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
         f"{local_sec}\n\n"
         f"{cloud_sec}\n\n"
         f"{transfer_sec}\n\n"
+        f"{integrity_sec}"
         f"{sla_sec}\n"
         f"{usb_sec}"
         f"⏰ <b>下次例行排程：</b>每日 {SYNC_SCHEDULE_TIME}"
@@ -512,6 +541,161 @@ def run_health_guard() -> tuple[bool, str]:
         send_telegram(notice_msg)
 
     return True, "READY"
+
+# ================= Canary Data Integrity Verification Engine =================
+def calculate_local_file_sha256(file_path: str) -> str:
+    """計算本地檔案的 SHA-256 雜湊基準值 (以 64KB 分塊讀取)"""
+    try:
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        logging.error(f"Failed to calculate local sha256 for {file_path}: {e}")
+        return ""
+
+def stream_remote_file_sha256(remote_crypt: str, rel_path: str, timeout: int = 45) -> tuple[bool, str]:
+    """
+    零硬碟磨損：透過 rclone cat 內存串流讀取雲端解密後的明文資料並即時計算 SHA-256
+    - 同時驗證了：雲端檔案存在性 + XSalsa20 金鑰解密能力 + 跨雲位元無損一致性
+    """
+    cmd = [
+        "rclone", "cat",
+        f"{remote_crypt}:{rel_path}",
+        f"--config={CONFIG_PATH}"
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        h = hashlib.sha256()
+        while chunk := proc.stdout.read(65536):
+            h.update(chunk)
+        proc.wait(timeout=timeout)
+        if proc.returncode != 0:
+            err = proc.stderr.read().decode("utf-8", errors="ignore").strip()
+            return False, f"讀取失敗 ({err[:60]})" if err else "檔案不存在或讀取異常"
+        return True, h.hexdigest()
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return False, "串流下載解密超時"
+    except Exception as e:
+        return False, f"異常: {str(e)[:50]}"
+
+def sample_candidate_files(sample_count: int = 10, min_size: int = 10 * 1024, max_size: int = 20 * 1024 * 1024) -> list:
+    """
+    自本地 /data 智能隨機抽取小檔案候選集：
+    - 範圍：10 KB ~ 20 MB (具備代表性且極速解密)
+    - 自動排除系統暫存、回收站、相簿縮圖快取
+    """
+    data_dir = "/data"
+    targets = get_backup_targets()
+    candidates = []
+    excluded_dirs = {".recycle", "thumb", ".@#local", "@eaDir", ".git", "staging", "logs"}
+    excluded_files = {"desktop.ini", "Thumbs.db", ".DS_Store"}
+
+    for t in targets:
+        t_path = os.path.join(data_dir, t)
+        if not os.path.exists(t_path):
+            continue
+        for root, dirs, files in os.walk(t_path):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith(".")]
+            for f in files:
+                if f.startswith(".") or f in excluded_files:
+                    continue
+                full_path = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(full_path)
+                    if min_size <= sz <= max_size:
+                        rel_path = os.path.relpath(full_path, data_dir).replace("\\", "/")
+                        candidates.append((rel_path, sz, full_path))
+                except Exception:
+                    continue
+
+    if not candidates:
+        logging.warning("No suitable candidate files found for integrity sampling.")
+        return []
+
+    sampled = random.sample(candidates, min(sample_count, len(candidates)))
+    return sampled
+
+def run_data_integrity_verification(sample_count: int = 10) -> dict:
+    """
+    執行端到端金絲雀完整性抽樣比對：
+    1. 隨機選取 10 個代表性小檔案並計算本地 SHA-256
+    2. 並行從各雲端加密池 (OD1, GD1, GD2) 即時串流解密計算 SHA-256
+    3. 逐位元比對本地與雲端 Hash，統計一致率
+    """
+    logging.info(f"=== Starting Canary Data Integrity Verification (Sample: {sample_count}) ===")
+    samples = sample_candidate_files(sample_count)
+    if not samples:
+        return {"all_ok": True, "samples_count": 0, "clusters": {}, "summary": "無可抽樣檔案"}
+
+    # 1. 建立本地基準表
+    baseline = []
+    for rel_path, sz, full_path in samples:
+        loc_hash = calculate_local_file_sha256(full_path)
+        if loc_hash:
+            baseline.append({
+                "rel_path": rel_path,
+                "size_kb": sz / 1024.0,
+                "local_hash": loc_hash
+            })
+
+    if not baseline:
+        return {"all_ok": True, "samples_count": 0, "clusters": {}, "summary": "本地基準計算失敗"}
+
+    clusters = get_all_union_clusters()
+    cluster_results = {}
+    overall_ok = True
+
+    # 2. 並行檢驗各雲端
+    def verify_single_remote_file(crypt_name: str, item: dict) -> tuple[str, bool, str]:
+        rel = item["rel_path"]
+        ok, res = stream_remote_file_sha256(crypt_name, rel)
+        if ok and res == item["local_hash"]:
+            return rel, True, "MATCH"
+        elif ok:
+            return rel, False, f"Hash不符 (雲端: {res[:8]}... 期望: {item['local_hash'][:8]}...)"
+        else:
+            return rel, False, res
+
+    for c in clusters:
+        crypt_name = c.replace("_union", "_crypt")
+        label = get_cluster_label(c)
+        passed = 0
+        failed = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_map = {
+                executor.submit(verify_single_remote_file, crypt_name, item): item["rel_path"]
+                for item in baseline
+            }
+            for fut in concurrent.futures.as_completed(future_map):
+                rel, is_match, detail = fut.result()
+                if is_match:
+                    passed += 1
+                else:
+                    failed.append((rel, detail))
+
+        is_c_ok = (passed == len(baseline))
+        if not is_c_ok:
+            overall_ok = False
+
+        cluster_results[crypt_name] = {
+            "label": label,
+            "passed": passed,
+            "total": len(baseline),
+            "is_ok": is_c_ok,
+            "failed": failed
+        }
+        logging.info(f"Integrity for {label} ({crypt_name}): {passed}/{len(baseline)} passed")
+
+    return {
+        "all_ok": overall_ok,
+        "samples_count": len(baseline),
+        "samples": baseline,
+        "clusters": cluster_results
+    }
 
 # ================= Docker GFS Snapshot Engine =================
 def prune_gfs_snapshots(remote_dir: str):
@@ -1058,10 +1242,14 @@ def execute_backup():
             except Exception as e:
                 sync_results[crypt_name] = (False, f"❌ 異常: {e}")
 
+    # 3. Phase 2: Canary Data Integrity Verification (隨機金絲雀完整性抽樣)
+    logging.info("=== Phase 2: Running Canary Data Integrity Verification ===")
+    integrity_results = run_data_integrity_verification(sample_count=10)
+
     duration = int(time.time() - start_time)
     duration_str = f"{duration // 60} 分 {duration % 60} 秒"
 
-    report_msg = generate_daily_executive_report(duration_str, sync_results, targets, docker_msg)
+    report_msg = generate_daily_executive_report(duration_str, sync_results, targets, docker_msg, integrity_results)
     send_telegram(report_msg)
 
 def execute_mirrors_only():
@@ -1162,6 +1350,7 @@ if __name__ == "__main__":
     parser.add_argument("--sync-gd2-now", action="store_true", help="Sync local NAS -> GD2 only")
     parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> all mirrors directly (GD1, GD2, etc.)")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup to all clouds directly from NAS")
+    parser.add_argument("--verify-now", action="store_true", help="Run 10-file canary data integrity verification immediately and print/report")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
     parser.add_argument("--status", action="store_true", help="Generate and print realtime status report (also sends to Telegram if configured)")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon scheduler")
@@ -1191,13 +1380,60 @@ if __name__ == "__main__":
         execute_mirrors_only()
     elif args.sync_now:
         execute_backup()
+    elif args.verify_now:
+        print("=== Running Canary Data Integrity Verification Now ===")
+        res = run_data_integrity_verification(sample_count=10)
+        print(f"Sample Count: {res['samples_count']}")
+        print(f"Overall Status: {'PASSED' if res['all_ok'] else 'FAILED'}")
+        for s in res.get("samples", []):
+            print(f"• {s['rel_path']} ({s['size_kb']:.1f} KB) -> SHA256: {s['local_hash'][:16]}...")
+        for crypt, cinfo in res.get("clusters", {}).items():
+            print(f"Cluster {cinfo['label']} ({crypt}): {cinfo['passed']}/{cinfo['total']} Passed")
+            if cinfo["failed"]:
+                for f_rel, f_err in cinfo["failed"]:
+                    print(f"  ❌ {f_rel}: {f_err}")
+
+        if TG_BOT_TOKEN and TG_CHAT_ID:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            lines = [
+                "🧬 <b>【fnOS 備份系統 - 隨機資料完整性驗證戰報】</b>",
+                f"📅 <b>檢驗時間：</b> <code>{now_str}</code>",
+                f"📊 <b>抽樣規模：</b> 隨機抽樣 {res['samples_count']} 份小檔案 (SHA-256 逐位元比對)",
+                f"🛡️ <b>總體結果：</b> {'🟢 <b>全部通過 (100% 一致無損)</b>' if res['all_ok'] else '🔴 <b>偵測到資料不一致或讀取異常</b>'}\n",
+                "☁️ <b>各雲端解密校驗詳情：</b>"
+            ]
+            for crypt, cinfo in res.get("clusters", {}).items():
+                status_icon = "✅" if cinfo["is_ok"] else "🔴"
+                lines.append(f"• <b>{cinfo['label']}</b>：{status_icon} {cinfo['passed']}/{cinfo['total']} 一致 (內存串流解密)")
+                if cinfo["failed"]:
+                    for f_rel, f_err in cinfo["failed"][:3]:
+                        lines.append(f"  └ ❌ <code>{f_rel}</code>: {f_err}")
+
+            lines.append("\n💡 <i>本檢驗採內存流式解密比對，零硬碟磨損、零磁碟暫存。</i>")
+            msg = "\n".join(lines)
+            send_success = send_telegram(msg)
+            print(f"Telegram Notification Sent: {send_success}")
     elif args.test_report:
         clusters = get_all_union_clusters()
         mock_sync_results = {
             c.replace("_union", "_crypt"): (True, "✅ 成功 (本地直傳)")
             for c in clusters
         }
-        report = generate_daily_executive_report("測試 (0 分 0 秒)", mock_sync_results, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)")
+        mock_integrity = {
+            "all_ok": True,
+            "samples_count": 10,
+            "clusters": {
+                c.replace("_union", "_crypt"): {
+                    "label": get_cluster_label(c),
+                    "passed": 10,
+                    "total": 10,
+                    "is_ok": True,
+                    "failed": []
+                }
+                for c in clusters
+            }
+        }
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", mock_sync_results, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", mock_integrity)
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")

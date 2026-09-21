@@ -231,15 +231,27 @@ Telegram 戰報採用手機最適化垂直卡片風結構，杜絕孤字斷行�
 • Docker 快照 ：✅ 496 MB (GFS 階梯)
 • 總執行耗時  ：3 分 45 秒
 
+🧬 端到端資料完整性驗證 (隨機金絲雀抽樣)
+• 抽樣規模：隨機 10 份小檔案 (SHA-256 逐位元比對)
+• OD1 微軟主本：✅ 10/10 一致 (解密無損)
+• GD1 谷歌鏡像1：✅ 10/10 一致 (解密無損)
+• GD2 谷歌鏡像2：✅ 10/10 一致 (解密無損)
+
 🛡️ 4-3-2 容災鏈路檢核：完全合規 🟢
 ├ 本地實體陣列：🟢 正常
-├ OD1 微軟主本：🟢 M365 5TB
-├ GD1 谷歌鏡像1：🟢 Google 5TB
-└ GD2 谷歌鏡像2：🟢 Google 5TB
+├ OD1 微軟主本：🟢 M365 5TB ｜ 驗證無損
+├ GD1 谷歌鏡像1：🟢 Google 5TB ｜ 驗證無損
+└ GD2 谷歌鏡像2：🟢 Google 5TB ｜ 驗證無損
 
 💾 系統隨身碟時光機：🟢 正常 (3.2 GB 快照, 剩 24.5 GB)
 ⏰ 下次例行排程：每日 02:00
 ```
+
+### 3. 金絲雀資料完整性檢驗引擎 (Canary Data Integrity Engine)
+* **隨機主動抽樣**：每日備份完畢後，系統自動從 `/data` 中隨機抽取 10 份代表性小檔案（10 KB ~ 20 MB），自動排除系統暫存、回收站與相簿縮圖快取。
+* **零硬碟磨損串流解密**：透過 `rclone cat` 由內存管道即時以 XSalsa20 解密並流式計算 SHA-256，**全程零磁碟暫存寫入、零 NVMe/SSD 磨損**。
+* **多雲鏈路端到端驗證**：同時驗證 OD1、GD1、GD2 的「雲端檔案存在性」、「金鑰解密能力」與「跨雲二進位位元無損一致性」，杜絕靜默資料損壞（Bit Rot）。
+* **即時雙軌呈現**：檢驗結果即時呈現於每日 Telegram 維運戰報，並於容災鏈路樹狀圖動態追加 `｜ 驗證無損` 徽章。
 
 ---
 
@@ -295,6 +307,7 @@ docker compose exec rclone-backup-guard rclone copy "gd1_crypt:1000/MyDocuments"
 | :--- | :--- |
 | **手動健康與容量檢查** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --check-only` |
 | **手動測試 Telegram 戰報** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --test-report` |
+| **隨機金絲雀資料完整性檢驗** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --verify-now` |
 | **手動立即執行 Docker GFS 備份**| `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
 | **手動立即直推微軟 OD1 (主本)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-od1-now` |
 | **手動立即直推谷歌 GD1 (5TB 鏡像一)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd1-now` |
