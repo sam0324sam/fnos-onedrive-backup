@@ -268,20 +268,8 @@ def get_local_storage_stats(path="/data") -> dict:
         return {}
 
 def get_cluster_label(name: str) -> str:
-    """自動依據集群或加密層代號返回易讀的業務顯示名稱"""
+    """自動依據集群或加密層代號返回簡短乾淨的業務標籤 (例如 OD1, GD1, GD2)"""
     clean = name.replace("_union", "").replace("_crypt", "")
-    if clean == "od1":
-        return "OD1 微軟主本"
-    elif clean == "od2":
-        return "OD2 微軟鏡像"
-    elif clean == "gd1":
-        return "GD1 谷歌鏡像1"
-    elif clean == "gd2":
-        return "GD2 谷歌鏡像2"
-    elif clean.startswith("gd"):
-        return f"{clean.upper()} 谷歌鏡像"
-    elif clean.startswith("od"):
-        return f"{clean.upper()} 微軟鏡像"
     return clean.upper()
 
 def get_all_union_clusters() -> list:
@@ -412,8 +400,8 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     if docker_msg:
         m_sz = re.search(r"(\d+\.?\d*\s+[KMGTP]B)", docker_msg)
         clean_docker = f"✅ {m_sz.group(1)} (GFS 階梯)" if m_sz else "✅ 已封存 (GFS 階梯)"
-        transfer_lines.append(f"• Docker 快照 ：{clean_docker}")
-    transfer_lines.append(f"• 總執行耗時  ：{duration_str}")
+        transfer_lines.append(f"• Docker 快照：{clean_docker}")
+    transfer_lines.append(f"• 總執行耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
     # 5. 端到端資料完整性驗證 (隨機金絲雀抽樣)
@@ -421,8 +409,8 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     int_clusters = integrity_results.get("clusters", {}) if integrity_results else {}
     if integrity_results and integrity_results.get("samples_count", 0) > 0:
         int_lines = [
-            "🧬 <b>端到端資料完整性驗證 (隨機金絲雀抽樣)</b>",
-            f"• 抽樣規模：隨機 {integrity_results['samples_count']} 份小檔案 (SHA-256 逐位元比對)"
+            "🧬 <b>資料完整性驗證 (金絲雀抽樣)</b>",
+            f"• 抽樣規模：隨機 {integrity_results['samples_count']} 份檔案 (SHA-256 比對)"
         ]
         for c_name in clusters:
             crypt_name = c_name.replace("_union", "_crypt")
@@ -430,7 +418,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
             stat = int_clusters.get(crypt_name)
             if stat:
                 if stat["is_ok"]:
-                    int_lines.append(f"• {label}：✅ {stat['passed']}/{stat['total']} 一致 (解密無損)")
+                    int_lines.append(f"• {label}：✅ {stat['passed']}/{stat['total']} 一致 (無損)")
                 else:
                     failed_hint = f" ({len(stat['failed'])} 異常)"
                     int_lines.append(f"• {label}：🔴 {stat['passed']}/{stat['total']} 一致{failed_hint}")
@@ -444,7 +432,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     sla_status = "完全合規 🟢" if is_fully_compliant else "鏈路警示 ⚠️"
     tree_lines = [
         f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
-        f"├ 本地實體陣列：🟢 正常"
+        f"├ 本地陣列：🟢 正常"
     ]
     for idx, c_name in enumerate(clusters):
         is_last = (idx == len(clusters) - 1)
@@ -455,7 +443,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
         c_int = int_clusters.get(crypt_name)
         c_verified = c_int.get("is_ok", True) if c_int else True
         sub_desc = "Google 5TB" if "gd" in c_name else "M365 5TB"
-        badge = " ｜ 驗證無損" if (c_int and c_verified) else ""
+        badge = " (無損)" if (c_int and c_verified) else ""
         node_str = f"🟢 {sub_desc}{badge}" if (c_ok and c_verified) else "🔴 異常"
         tree_lines.append(f"{branch} {label}：{node_str}")
     sla_sec = "\n".join(tree_lines)
@@ -469,9 +457,9 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
             try:
                 du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
                 free_gb = du.free / (1024 * 1024 * 1024)
-                usb_sec = f"\n💾 <b>系統隨身碟時光機：</b>🟢 正常 ({sz} 快照, 剩 {free_gb:.1f} GB)\n"
+                usb_sec = f"\n💾 <b>隨身碟時光機：</b>🟢 正常 ({sz}, 剩 {free_gb:.1f} GB)\n"
             except Exception:
-                usb_sec = f"\n💾 <b>系統隨身碟時光機：</b>🟢 正常 ({sz} 快照)\n"
+                usb_sec = f"\n💾 <b>隨身碟時光機：</b>🟢 正常 ({sz})\n"
 
     full_report = (
         f"📊 <b>{title_prefix}</b>\n"
@@ -1398,18 +1386,18 @@ if __name__ == "__main__":
             lines = [
                 "🧬 <b>【fnOS 備份系統 - 隨機資料完整性驗證戰報】</b>",
                 f"📅 <b>檢驗時間：</b> <code>{now_str}</code>",
-                f"📊 <b>抽樣規模：</b> 隨機抽樣 {res['samples_count']} 份小檔案 (SHA-256 逐位元比對)",
+                f"📊 <b>抽樣規模：</b> 隨機抽樣 {res['samples_count']} 份檔案 (SHA-256 比對)",
                 f"🛡️ <b>總體結果：</b> {'🟢 <b>全部通過 (100% 一致無損)</b>' if res['all_ok'] else '🔴 <b>偵測到資料不一致或讀取異常</b>'}\n",
                 "☁️ <b>各雲端解密校驗詳情：</b>"
             ]
             for crypt, cinfo in res.get("clusters", {}).items():
                 status_icon = "✅" if cinfo["is_ok"] else "🔴"
-                lines.append(f"• <b>{cinfo['label']}</b>：{status_icon} {cinfo['passed']}/{cinfo['total']} 一致 (內存串流解密)")
+                lines.append(f"• <b>{cinfo['label']}</b>：{status_icon} {cinfo['passed']}/{cinfo['total']} 一致 (無損)")
                 if cinfo["failed"]:
                     for f_rel, f_err in cinfo["failed"][:3]:
                         lines.append(f"  └ ❌ <code>{f_rel}</code>: {f_err}")
 
-            lines.append("\n💡 <i>本檢驗採內存流式解密比對，零硬碟磨損、零磁碟暫存。</i>")
+            lines.append("\n💡 <i>採內存流式解密比對，零硬碟磨損、零磁碟暫存。</i>")
             msg = "\n".join(lines)
             send_success = send_telegram(msg)
             print(f"Telegram Notification Sent: {send_success}")
