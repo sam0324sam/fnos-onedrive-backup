@@ -63,14 +63,27 @@ fi
 echo "[3/4] 使用 zstd 多核壓縮備份根系統 ($ROOT_DEV)..."
 START_TIME=$(date +%s)
 
-tar --numeric-owner --xattrs --acls --one-file-system -cp \
+set +e
+tar --warning=no-file-changed --numeric-owner --xattrs --acls --one-file-system -cp \
     --exclude='./tmp/*' \
     --exclude='./var/tmp/*' \
     --exclude='./var/cache/*' \
     --exclude='./swapfile' \
+    --exclude='./sys/*' \
+    --exclude='./proc/*' \
+    --exclude='./dev/*' \
+    --exclude='./run/*' \
     -I 'zstd -T0 -3' \
     -f "$TARGET_ARCHIVE" \
     -C / .
+TAR_EXIT=$?
+set -e
+
+# GNU tar: 0 = 正常完成, 1 = 部分日誌/動態檔案讀取期間發生變動 (在線系統正常現象)
+if [ $TAR_EXIT -ne 0 ] && [ $TAR_EXIT -ne 1 ]; then
+    echo "❌ 錯誤：Tar 備份異常中斷 (Exit Code: $TAR_EXIT)！"
+    exit $TAR_EXIT
+fi
 
 ln -sf "$ARCHIVE_NAME" "${BACKUP_DIR}/fnos_system_backup_latest.tar.zst"
 
@@ -80,10 +93,10 @@ ARCHIVE_SIZE=$(du -h "$TARGET_ARCHIVE" | cut -f1)
 
 echo "✅ 系統打包完成！耗時: ${DURATION} 秒，備份檔大小: ${ARCHIVE_SIZE}"
 
-# 6. 歷史版本輪替 (保留最新 4 份)
+# 6. 歷史版本輪替 (保留最新 4 份，排除 latest 軟連結)
 echo "[4/4] 執行歷史版本輪替 (保留最新 4 份)..."
 cd "$BACKUP_DIR"
-ls -t fnos_system_backup_*.tar.zst 2>/dev/null | tail -n +5 | while read -r old_backup; do
+ls -t fnos_system_backup_[0-9]*.tar.zst 2>/dev/null | tail -n +5 | while read -r old_backup; do
     if [ -n "$old_backup" ] && [ -f "$old_backup" ]; then
         echo "🗑️  刪除過期快照: $old_backup"
         rm -f "$old_backup"
