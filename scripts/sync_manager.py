@@ -1404,7 +1404,7 @@ if __name__ == "__main__":
     elif args.test_report:
         clusters = get_all_union_clusters()
         mock_sync_results = {
-            c.replace("_union", "_crypt"): (True, "✅ 成功 (本地直傳)")
+            c.replace("_union", "_crypt"): (True, "✅ 直傳完成")
             for c in clusters
         }
         mock_integrity = {
@@ -1421,7 +1421,7 @@ if __name__ == "__main__":
                 for c in clusters
             }
         }
-        report = generate_daily_executive_report("測試 (0 分 0 秒)", mock_sync_results, targets, "✅ 已封存 (496.0 MB, GFS 階梯保留中)", mock_integrity)
+        report = generate_daily_executive_report("測試 (0 分 0 秒)", mock_sync_results, targets, "✅ 496.0 MB (GFS)", mock_integrity)
         print(report)
         success = send_telegram(report)
         print(f"Telegram Send Result: {success}")
