@@ -365,14 +365,14 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     if local_stat:
         local_sec = (
             f"🖥️ <b>本地陣列 ({nas_dir_disp})</b>\n"
-            f"• 儲存水位：<b>{local_stat['used_gb']:.1f} GB</b> / {local_stat['total_tb']:.1f} TB (剩 {local_stat['free_tb']:.1f} TB)\n"
+            f"• 儲存水位：<b>{local_stat['used_gb']:.1f} GB</b> (餘 {local_stat['free_tb']:.1f} TB)\n"
             f"• 納管目錄：{targets_str}"
         )
     else:
         local_sec = f"🖥️ <b>本地陣列 ({nas_dir_disp})</b>\n• 納管目錄：{targets_str}"
 
     # 3. 雲端儲存池現況 (緊湊單行化)
-    cloud_lines = ["☁️ <b>雲端儲存池現況 (已用 ｜ 剩餘可用)</b>"]
+    cloud_lines = ["☁️ <b>雲端儲存池 (已用 ｜ 剩餘)</b>"]
     all_clusters_ok = True
     for c_name in clusters:
         c_stat = get_cluster_stats(c_name)
@@ -385,12 +385,12 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     cloud_sec = "\n".join(cloud_lines)
 
     # 4. 本次備份傳輸結果 (動態多雲直灌)
-    transfer_lines = ["⚡ <b>本次備份傳輸結果 (多雲並行直灌)</b>"]
+    transfer_lines = ["⚡ <b>備份傳輸結果 (多雲直灌)</b>"]
     all_sync_ok = True
     for c_name in clusters:
         crypt_name = c_name.replace("_union", "_crypt")
         label = get_cluster_label(c_name)
-        res = sync_results.get(crypt_name, (True, "✅ 成功 (本地直傳)"))
+        res = sync_results.get(crypt_name, (True, "✅ 直傳完成"))
         status_ok = res[0]
         status_msg = res[1]
         if not status_ok:
@@ -399,9 +399,9 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
 
     if docker_msg:
         m_sz = re.search(r"(\d+\.?\d*\s+[KMGTP]B)", docker_msg)
-        clean_docker = f"✅ {m_sz.group(1)} (GFS 階梯)" if m_sz else "✅ 已封存 (GFS 階梯)"
-        transfer_lines.append(f"• Docker 快照：{clean_docker}")
-    transfer_lines.append(f"• 總執行耗時：{duration_str}")
+        clean_docker = f"✅ {m_sz.group(1)} (GFS)" if m_sz else "✅ 已封存 (GFS)"
+        transfer_lines.append(f"• 快照：{clean_docker}")
+    transfer_lines.append(f"• 耗時：{duration_str}")
     transfer_sec = "\n".join(transfer_lines)
 
     # 5. 端到端資料完整性驗證 (隨機金絲雀抽樣)
@@ -409,8 +409,8 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     int_clusters = integrity_results.get("clusters", {}) if integrity_results else {}
     if integrity_results and integrity_results.get("samples_count", 0) > 0:
         int_lines = [
-            "🧬 <b>資料完整性驗證 (金絲雀抽樣)</b>",
-            f"• 抽樣規模：隨機 {integrity_results['samples_count']} 份檔案 (SHA-256 比對)"
+            "🧬 <b>資料完整性驗證 (金絲雀)</b>",
+            f"• 抽樣比對：隨機 {integrity_results['samples_count']} 份 (SHA-256)"
         ]
         for c_name in clusters:
             crypt_name = c_name.replace("_union", "_crypt")
@@ -431,7 +431,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
     is_fully_compliant = all_sync_ok and all_clusters_ok and all_integrity_ok
     sla_status = "完全合規 🟢" if is_fully_compliant else "鏈路警示 ⚠️"
     tree_lines = [
-        f"🛡️ <b>4-3-2 容災鏈路檢核：{sla_status}</b>",
+        f"🛡️ <b>4-3-2 容災鏈路：{sla_status}</b>",
         f"├ 本地陣列：🟢 正常"
     ]
     for idx, c_name in enumerate(clusters):
@@ -457,9 +457,9 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
             try:
                 du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
                 free_gb = du.free / (1024 * 1024 * 1024)
-                usb_sec = f"\n💾 <b>隨身碟時光機：</b>🟢 正常 ({sz}, 剩 {free_gb:.1f} GB)\n"
+                usb_sec = f"\n💾 <b>隨身碟：</b>🟢 {sz} 快照 (餘 {free_gb:.1f} GB)\n"
             except Exception:
-                usb_sec = f"\n💾 <b>隨身碟時光機：</b>🟢 正常 ({sz})\n"
+                usb_sec = f"\n💾 <b>隨身碟：</b>🟢 {sz} 快照\n"
 
     full_report = (
         f"📊 <b>{title_prefix}</b>\n"
@@ -470,7 +470,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
         f"{integrity_sec}"
         f"{sla_sec}\n"
         f"{usb_sec}"
-        f"⏰ <b>下次例行排程：</b>每日 {SYNC_SCHEDULE_TIME}"
+        f"⏰ <b>下次排程：</b>每日 {SYNC_SCHEDULE_TIME}"
     )
     return full_report
 
@@ -1187,7 +1187,7 @@ def sync_local_to_cloud(target_crypt: str, cloud_label: str, targets: list, log_
             logging.info(f"Sync to {dst_remote} finished for {folder}")
 
     if all_success:
-        return True, "✅ 增量同步完成"
+        return True, "✅ 直傳完成"
     else:
         return False, f"❌ 同步警示 ({','.join(failed_folders)} 異常)"
 
