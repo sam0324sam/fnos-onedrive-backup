@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 fnOS 4-3-2 Enterprise Multi-Cloud Direct Backup and Health Guard
-- Phase 0: Docker GFS Snapshots -> Multi-Cloud (OD1, GD1, GD2)
-- Node 1: Local NAS (/vol1) -> od1_crypt (Microsoft Primary, XSalsa20 Encrypted)
-- Node 2: Local NAS (/vol1) -> gd1_crypt (Google Drive 5TB Mirror 1, XSalsa20 Encrypted)
-- Node 3: Local NAS (/vol1) -> gd2_crypt (Google Drive 5TB Mirror 2, XSalsa20 Encrypted)
+- Phase 0: Docker GFS Snapshots -> Multi-Cloud (GD1, GD2, GD3)
+- Node 1: Local NAS (/vol1) -> gd1_crypt (Google Drive 5TB Primary, XSalsa20 Encrypted)
+- Node 2: Local NAS (/vol1) -> gd2_crypt (Google Drive 5TB Mirror 1, XSalsa20 Encrypted)
+- Node 3: Local NAS (/vol1) -> gd3_crypt (Google Drive 5TB Mirror 2, XSalsa20 Encrypted)
 - Pre-flight Health and Capacity Guard with Telegram Executive Alerting
 """
 
@@ -273,16 +273,16 @@ def get_cluster_label(name: str) -> str:
     return clean.upper()
 
 def get_all_union_clusters() -> list:
-    """自動從 rclone.conf 中搜尋所有合流池/集群 (動態支援 OD1, GD1, GD2 等)"""
+    """自動從 rclone.conf 中搜尋所有合流池/集群 (動態支援 GD1, GD2, GD3 等)"""
     if not os.path.exists(CONFIG_PATH):
-        return ["od1_union", "gd1_union", "gd2_union"]
+        return ["gd1_union", "gd2_union", "gd3_union"]
     cfg = configparser.ConfigParser()
     cfg.read(CONFIG_PATH, encoding="utf-8")
     clusters = []
     for sec in cfg.sections():
         if sec.endswith("_union"):
             clusters.append(sec)
-    return clusters if clusters else ["od1_union", "gd1_union", "gd2_union"]
+    return clusters if clusters else ["gd1_union", "gd2_union", "gd3_union"]
 
 def get_cluster_stats(cluster_name: str) -> dict:
     """動態計算單一雲端合流池內所有帳號之總量、已用、剩餘與健康狀態"""
@@ -357,7 +357,12 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
 
     # 1. 標題與基本規格
     title_prefix = "【fnOS 備份體系每日維運日報】"
-    spec_label = "4-3-2 雙雲端容災" if (has_gdrive and has_onedrive) else f"{len(clusters)+1}-3-2 多雲容災"
+    if has_gdrive and has_onedrive:
+        spec_label = "4-3-2 雙雲端容災"
+    elif len(clusters) >= 3 and has_gdrive:
+        spec_label = "4-3-2 三雲鏡像容災"
+    else:
+        spec_label = f"{len(clusters)+1}-3-2 多雲容災"
 
     # 2. 本地儲存池
     targets_str = ", ".join([f"<code>{t}</code>" for t in targets])
@@ -500,7 +505,7 @@ def run_health_guard() -> tuple[bool, str]:
             if s["status"] == "ERROR":
                 critical_errors.append(f"• <b>{lbl} [{s['remote']}]</b> 連線異常/失效：{s['error']}")
             elif s["status"] == "LOW_SPACE":
-                low_space_warnings.append(f"• <b>{lbl} [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (< {FREE_THRESHOLD_GB} GB)")
+                low_space_warnings.append(f"• <b>{lbl} [{s['remote']}]</b> 剩餘容量告急：{s['free_gb']:.1f} GB (&lt; {FREE_THRESHOLD_GB} GB)")
             else:
                 has_healthy_space = True
 
@@ -1256,14 +1261,16 @@ def execute_mirrors_only():
     logging.info(f"Discovered backup target folders: {targets}")
 
     all_clusters = get_all_union_clusters()
-    mirror_clusters = [c for c in all_clusters if not c.startswith("od1")]
+    primary = "od1_union" if "od1_union" in all_clusters else all_clusters[0]
+    mirror_clusters = [c for c in all_clusters if c != primary]
     if not mirror_clusters:
         logging.warning("No mirror clusters found in config.")
         return
 
     logging.info(f"=== Starting Concurrent Direct Sync to Mirrors ({', '.join(mirror_clusters)}) ===")
+    primary_crypt = primary.replace("_union", "_crypt")
     sync_results = {
-        "od1_crypt": (True, "⚪ 主本略過 (僅同步鏡像)")
+        primary_crypt: (True, "⚪ 主本略過 (僅同步鏡像)")
     }
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(mirror_clusters))) as executor:
         future_map = {}
@@ -1338,7 +1345,8 @@ if __name__ == "__main__":
     parser.add_argument("--sync-od2-now", action="store_true", help="Sync local NAS -> OD2 only (Legacy/Fallback)")
     parser.add_argument("--sync-gd1-now", action="store_true", help="Sync local NAS -> GD1 only")
     parser.add_argument("--sync-gd2-now", action="store_true", help="Sync local NAS -> GD2 only")
-    parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> all mirrors directly (GD1, GD2, etc.)")
+    parser.add_argument("--sync-gd3-now", action="store_true", help="Sync local NAS -> GD3 only")
+    parser.add_argument("--sync-mirrors-now", action="store_true", help="Sync local NAS -> all mirrors directly (GD1, GD2, GD3, etc.)")
     parser.add_argument("--sync-now", action="store_true", help="Run full backup to all clouds directly from NAS")
     parser.add_argument("--verify-now", action="store_true", help="Run 10-file canary data integrity verification immediately and print/report")
     parser.add_argument("--test-report", action="store_true", help="Generate and send daily executive report for testing")
@@ -1366,6 +1374,9 @@ if __name__ == "__main__":
     elif args.sync_gd2_now:
         success, msg = sync_local_to_cloud("gd2_crypt", "GD2 谷歌鏡像2", targets, "sync_gd2")
         print(f"GD2 Sync Result: {success} -> {msg}")
+    elif args.sync_gd3_now:
+        success, msg = sync_local_to_cloud("gd3_crypt", "GD3 谷歌鏡像3", targets, "sync_gd3")
+        print(f"GD3 Sync Result: {success} -> {msg}")
     elif args.sync_mirrors_now:
         execute_mirrors_only()
     elif args.sync_now:

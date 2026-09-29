@@ -1,6 +1,6 @@
-# 🛡️ fnOS 4-3-2 企業級跨雲端雙巨頭極速加密備份系統規劃書
-> **Architecture & Operation Blueprint for Enterprise-Grade 4-3-2 Dual-Cloud Backup Solution**  
-> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Python SRE 守衛 ｜ 版本：v4.1 (4-3-2 Dual-Cloud Edition)*
+# 🛡️ fnOS 4-3-2 企業級多雲端極速加密備份系統規劃書
+> **Architecture & Operation Blueprint for Enterprise-Grade 4-3-2 Multi-Cloud Backup Solution**  
+> *維護者：sam0324sam ｜ 核心引擎：Docker + Rclone + Python SRE 守衛 ｜ 版本：v4.2 (4-3-2 Triple-Google-Drive Edition)*
 
 ---
 
@@ -20,26 +20,26 @@
 
 ## 一、 系統背景與設計原則
 
-本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、跨雲異質、極速扇出、零運維**的 4-3-2 雙雲端自動化備份體系。
+本專案旨在為 fnOS NAS 打造一套**高可靠、防勒索病毒、跨租戶容災、多帳號異質、極速扇出、零運維**的 4-3-2 雲端自動化備份體系。
 
-### 🌟 核心目標 (4-3-2 跨雲端雙巨頭備份鐵律)
-* **4 份資料副本**：本地原始資料 + OD1 微軟主儲存 + GD1 谷歌鏡像一 + GD2 谷歌鏡像二。
-* **3 種不同介質/體系**：本地實體 NVMe/HDD 陣列 + 微軟 M365 國際公有雲 + 谷歌 Google Drive 國際公有雲 (雙獨立 5TB 帳號)。
-* **2 處實體異地/供應商隔離**：
-  1. **微軟公有雲體系 (Microsoft Ecosystem)**（獨立海外海外租戶：原生 5.0 TB）
-  2. **谷歌跨雲端隔離 (Google Cloud Ecosystem)**（雙獨立 Google 帳號，各自享有獨立 5.0 TB 專屬儲存池，免除微軟 SharePoint Pooled 儲存池共用爆倉風控）。
+### 🌟 核心目標 (4-3-2 多雲鏡像備份鐵律)
+* **4 份資料副本**：本地原始資料 + GD1 谷歌主儲存 + GD2 谷歌鏡像一 + GD3 谷歌鏡像二。
+* **3 種不同介質/體系**：本地實體 NVMe/HDD 陣列 + 3 個完全獨立的 Google Drive 國際公有雲 (各自享有 5.0 TB 獨立儲存池)。
+* **2 處實體異地隔離**：
+  1. **本地私有雲節點**（實體私有儲存設備，雙卷隔離）。
+  2. **谷歌跨雲端帳號隔離 (Google Cloud Ecosystem)**（三個獨立 Google 帳號 `GD1`、`GD2`、`GD3`，徹底根除微軟 SharePoint Pooled 儲存池共用爆倉或賣家租戶限縮之風險）。
 
 ### 💎 設計原則
-1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，微軟與谷歌均無法分析檔案內容，100% 免疫特徵審查與屏蔽。
+1. **零信任客戶端加密 (Client-side Zero-Trust)**：檔案離開 NAS 前，於內存完成 XSalsa20 強度加密，雲端僅儲存 `.bin` 密文，谷歌無法分析檔案內容，100% 免疫特徵審查與屏蔽。
 2. **只增不減 (Append-Only Copy)**：本地誤刪或遭受勒索病毒加密修改時，雲端歷史檔案**永不自動刪除**。
 3. **冷熱資料分離 (Storage Tiering)**：
    * 守衛程式與高頻日誌置於高速池（如 NVMe SSD），避免日常巡檢喚醒硬碟。
    * 資料來源讀取大容量機械陣列（如 RAID 10/5），兼顧極速讀寫與延長硬碟壽命。
 4. **本地串流加密直灌 (Direct Local Multi-Cloud Streaming)**：
-   * 本地讀取 NAS 陣列，經內存管道即時以 XSalsa20 加密後直接上傳各雲端（OD1、GD1、GD2）。
+   * 本地讀取 NAS 陣列，經內存管道即時以 XSalsa20 加密後直接上傳各雲端（GD1、GD2、GD3）。
    * 徹底規避雲端中轉下載 API 延遲與限流，家用寬頻上傳跑滿（15 ~ 20+ MB/s），記憶體佔用極低（~60-150MB）。
 5. **多雲並行容災矩陣**：
-   * 一套金鑰架構，在微軟（OD1）與谷歌雙帳號（GD1/GD2）三方自動同步，杜絕單點故障與供應商綁定。
+   * 一套金鑰架構，在三個獨立 Google 帳號（GD1/GD2/GD3）全方位並行同步，杜絕單點故障與帳號風控風險。
 6. **零寫死自適應 (Zero-Hardcoding)**：自動探索本地 UID 使用者目錄、自動掃描多雲合流池、動態生成行動端最適排版戰報。
 
 ---
@@ -59,17 +59,17 @@ graph TD
         Crypt["XSalsa20 內存加密管道 (64KB~16MB Buffer)<br>檔案內容 .bin 密文 ｜ 目錄結構明文/加密"]
     end
 
-    subgraph Dual_Cloud ["☁️ 跨雲雙巨頭異地容災 (OneDrive 5TB + Google Drive 5TB x 2)"]
-        OD1["☁️ OD1 微軟主儲存 (od1_union)<br>獨立微軟租戶<br>(5.0 TB 空間，可循序擴充)"]
-        GD1["☁️ GD1 谷歌鏡像一 (gd1_union)<br>Google Drive 5TB<br>(5.0 TB 獨立個人空間)"]
-        GD2["☁️ GD2 谷歌鏡像二 (gd2_union)<br>Google Drive 5TB<br>(5.0 TB 獨立個人空間)"]
+    subgraph Triple_Cloud ["☁️ 三獨立雲端異地容災 (Google Drive 5TB x 3)"]
+        GD1["☁️ GD1 谷歌主儲存 (gd1_union)<br>Google Drive 5TB<br>(5.0 TB 獨立個人空間)"]
+        GD2["☁️ GD2 谷歌鏡像一 (gd2_union)<br>Google Drive 5TB<br>(5.0 TB 獨立個人空間)"]
+        GD3["☁️ GD3 谷歌鏡像二 (gd3_union)<br>Google Drive 5TB<br>(5.0 TB 獨立個人空間)"]
     end
 
     HDD -->|唯讀增量掃描| Crypt
     SSD -.->|Docker 快照打包| Crypt
-    Crypt -->|本地直推 15-20 MB/s| OD1
     Crypt -->|本地直推 15-20 MB/s| GD1
     Crypt -->|本地直推 15-20 MB/s| GD2
+    Crypt -->|本地直推 15-20 MB/s| GD3
 
     Guard -->|每日 02:00 巡檢戰報| TG["📱 Telegram 機器人通知"]
 ```
@@ -294,7 +294,7 @@ docker compose exec rclone-backup-guard rclone copy "gd1_crypt:1000/MyDocuments"
 3. 依 `config/rclone.conf.example` 與 `.env.example` 填回金鑰。
 4. 全量下載解密資料庫與使用者目錄（可選任一健康雲端節點）：
    ```bash
-   docker compose exec rclone-backup-guard rclone copy od1_crypt: /data/ --config=/config/rclone/rclone.conf -P
+   docker compose exec rclone-backup-guard rclone copy gd1_crypt: /data/ --config=/config/rclone/rclone.conf -P
    ```
 
 ---
@@ -309,13 +309,13 @@ docker compose exec rclone-backup-guard rclone copy "gd1_crypt:1000/MyDocuments"
 | **手動測試 Telegram 戰報** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --test-report` |
 | **隨機金絲雀資料完整性檢驗** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --verify-now` |
 | **手動立即執行 Docker GFS 備份**| `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --docker-backup-now` |
-| **手動立即直推微軟 OD1 (主本)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-od1-now` |
-| **手動立即直推谷歌 GD1 (5TB 鏡像一)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd1-now` |
-| **手動立即直推谷歌 GD2 (5TB 鏡像二)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd2-now` |
-| **手動立即直推兩大鏡像 (GD1 + GD2)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-mirrors-now` |
+| **手動立即直推谷歌 GD1 (5TB 主儲存)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd1-now` |
+| **手動立即直推谷歌 GD2 (5TB 鏡像一)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd2-now` |
+| **手動立即直推谷歌 GD3 (5TB 鏡像二)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-gd3-now` |
+| **手動立即直推所有鏡像 (GD2 + GD3)** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-mirrors-now` |
 | **手動立即觸發全量多雲直推備份** | `docker compose exec rclone-backup-guard python3 /app/scripts/sync_manager.py --sync-now` |
 | **即時查看守衛即時日誌** | `docker compose logs -f rclone-backup-guard` |
-| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/sync_od1_1000.log` |
+| **檢視詳細歷史日誌** | `cat logs/manager.log` ｜ `cat logs/sync_gd1_1000.log` |
 | **存取 Web GUI 儀表板** | 瀏覽器開啟 `http://<NAS_IP>:5572/` (內網免密碼直連) |
 
 ---
