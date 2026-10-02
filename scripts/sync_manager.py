@@ -463,10 +463,10 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
                 du = shutil.disk_usage(SYSTEM_BACKUP_DIR)
                 free_gb = du.free / (1024 * 1024 * 1024)
                 snapshot_files = glob.glob(os.path.join(SYSTEM_BACKUP_DIR, "fnos_system_backup_[0-9]*.tar.zst"))
-                count_hint = f" ({len(snapshot_files)} 份, 餘 {free_gb:.1f} GB)" if snapshot_files else f" (餘 {free_gb:.1f} GB)"
+                count_hint = f" ({len(snapshot_files)} 份, 餘 {free_gb:.1f} GB ｜ 每週日 03:00)" if snapshot_files else f" (餘 {free_gb:.1f} GB ｜ 每週日 03:00)"
                 usb_sec = f"\n💾 <b>隨身碟：</b>🟢 {sz} 快照{count_hint}\n"
             except Exception:
-                usb_sec = f"\n💾 <b>隨身碟：</b>🟢 {sz} 快照\n"
+                usb_sec = f"\n💾 <b>隨身碟：</b>🟢 {sz} 快照 (每週日 03:00)\n"
 
     full_report = (
         f"📊 <b>{title_prefix}</b>\n"
@@ -477,7 +477,7 @@ def generate_daily_executive_report(duration_str: str, sync_results: dict, targe
         f"{integrity_sec}"
         f"{sla_sec}\n"
         f"{usb_sec}"
-        f"⏰ <b>下次排程：</b>每日 {SYNC_SCHEDULE_TIME}"
+        f"⏰ <b>雲端排程：</b>每日 {SYNC_SCHEDULE_TIME}"
     )
     return full_report
 

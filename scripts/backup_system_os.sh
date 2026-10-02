@@ -4,6 +4,9 @@
 # ==============================================================================
 set -e
 
+# 確保系統工具路徑完整 (防止非交互式 cron 缺少 /usr/sbin, /sbin)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 BACKUP_DIR="${BACKUP_DIR:-/mnt/system_backup}"
 DATE=$(date +%Y%m%d_%H%M%S)
 ARCHIVE_NAME="fnos_system_backup_${DATE}.tar.zst"
@@ -15,7 +18,13 @@ DEFAULT_LOG="$(dirname "$SCRIPT_DIR")/logs/system_backup.log"
 LOG_FILE="${LOG_FILE:-$DEFAULT_LOG}"
 
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || LOG_FILE="${BACKUP_DIR}/system_backup_${DATE}.log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+
+# 僅在終端機互動執行時使用 tee，若已在背景重導向則避免日誌重複寫入
+if [ -t 1 ]; then
+    exec > >(tee -a "$LOG_FILE") 2>&1
+else
+    exec >> "$LOG_FILE" 2>&1
+fi
 
 echo "================================================================="
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🚀 開始執行 Linux/fnOS 系統盤全自動備份"
@@ -50,7 +59,7 @@ fi
 echo "[1/4] 備份硬碟分區表與 UUID 元數據..."
 sfdisk -d "$SYS_DISK" > "${BACKUP_DIR}/disk_partition_table.sfdisk" 2>/dev/null || true
 cp "${BACKUP_DIR}/disk_partition_table.sfdisk" "${BACKUP_DIR}/sde_partition_table.sfdisk" 2>/dev/null || true
-blkid "$PART_BOOT" "$PART_ROOT" > "${BACKUP_DIR}/disk_uuids.txt" 2>/dev/null || blkid > "${BACKUP_DIR}/disk_uuids.txt"
+blkid "$PART_BOOT" "$PART_ROOT" > "${BACKUP_DIR}/disk_uuids.txt" 2>/dev/null || blkid > "${BACKUP_DIR}/disk_uuids.txt" 2>/dev/null || true
 cat /etc/fstab > "${BACKUP_DIR}/fstab.bak" 2>/dev/null || true
 
 # 4. 備份 EFI 開機導引分區
